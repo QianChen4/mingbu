@@ -9,7 +9,7 @@ import re
 import shutil
 import sys
 
-RES = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+RES = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != '--detach' else os.path.dirname(os.path.abspath(__file__))
 HOME = os.environ['MINGBU_HOME']
 VERSIONS = os.path.join(HOME, 'versions')
 CURRENT = os.path.join(VERSIONS, 'current.txt')
@@ -58,6 +58,12 @@ def main():
         raise SystemExit('找不到程序文件，请重新下载明簿.app')
     code = os.path.join(VERSIONS, cur)
     os.chdir(code)
+    # 让 .app 自己马上结束，后台程序脱离出去单独运行。
+    # 否则 .app 会一直显示为“正在运行”，再次双击时 macOS 可能报“无法打开 -47”，也打不开新窗口。
+    if '--detach' in sys.argv and hasattr(os, 'fork'):
+        if os.fork() > 0:
+            os._exit(0)
+        os.setsid()
     os.execv(sys.executable, [sys.executable, '-I', os.path.join(code, 'start.py')])
 
 

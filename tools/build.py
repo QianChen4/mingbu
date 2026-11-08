@@ -188,13 +188,13 @@ def build_mac(version):
     z = Zip(path)
     app = '明簿.app/Contents/'
     plist = {
-        'CFBundleName': '明簿', 'CFBundleDisplayName': '明簿', 'CFBundleExecutable': '明簿',
+        'CFBundleName': '明簿', 'CFBundleDisplayName': '明簿', 'CFBundleExecutable': 'mingbu',
         'CFBundleIdentifier': 'local.caiwu.jizhang', 'CFBundleIconFile': 'app.icns',
         'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version, 'CFBundleVersion': version,
         'LSMinimumSystemVersion': '10.13', 'LSUIElement': True, 'NSHighResolutionCapable': True,
     }
     z.add_bytes(app + 'Info.plist', plist_xml(plist))
-    z.add_file(app + 'MacOS/明簿', os.path.join(TOOLS, 'mac', 'launch.sh'), 0o755)
+    z.add_file(app + 'MacOS/mingbu', os.path.join(TOOLS, 'mac', 'launch.sh'), 0o755)
     z.add_file(app + 'Resources/boot.py', os.path.join(TOOLS, 'mac', 'boot.py'), 0o644)
     z.add_file(app + 'Resources/app.icns', os.path.join(ROOT, 'assets', 'app.icns'), 0o644)
     add_program(z, app + 'Resources/program/' + vname + '/', version)

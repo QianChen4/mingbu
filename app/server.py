@@ -792,7 +792,7 @@ _httpd = None
 
 
 def _existing_instance():
-    """如果软件已经在运行，返回它的网址；否则返回 None。"""
+    """如果软件已经在运行，返回 (网址, 它的版本号)；否则返回 (None, None)。"""
     import urllib.request
     try:
         with open(INSTANCE_FILE, encoding='utf-8') as f:
@@ -801,10 +801,27 @@ def _existing_instance():
         with urllib.request.urlopen(url + 'api/version', timeout=1.5) as r:
             v = json.loads(r.read().decode('utf-8'))
         if os.path.normcase(v.get('root', '')) == os.path.normcase(db.ROOT):
-            return url
+            return url, str(v.get('version') or '')
     except Exception:
         pass
-    return None
+    return None, None
+
+
+def _stop_other(url):
+    """在后台运行的是别的版本（例如更新前的老版本没退出）：请它退出，最多等 8 秒。"""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url + 'api/shutdown', data=b'{}', headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=3).read()
+    except Exception:
+        pass
+    for _ in range(40):
+        time.sleep(0.2)
+        try:
+            urllib.request.urlopen(url + 'api/version', timeout=0.5).read()
+        except Exception:
+            return True
+    return False
 
 
 def _stop_server():
@@ -917,13 +934,16 @@ def _spawn_new_instance():
 
 def run(port=8765, open_browser=True):
     global _httpd
-    existing = _existing_instance()
-    if existing:
-        # 已经在运行：只打开窗口，不再启动第二份
+    existing, ver = _existing_instance()
+    if existing and ver == VERSION:
+        # 同一个版本已经在运行：只打开窗口，不再启动第二份
         print('软件已经在运行：%s' % existing)
         if open_browser:
             desktop.open_ui(existing)
         return
+    if existing:
+        print('后台还在运行 v%s，先让它退出，再启动 v%s' % (ver, VERSION))
+        _stop_other(existing)
     db.auto_backup_all()
     httpd = None
     for p in range(port, port + 30):

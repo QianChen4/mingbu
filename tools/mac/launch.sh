@@ -12,4 +12,7 @@ esac
 export MINGBU_HOME="$HOME/Library/Application Support/财务记账软件"
 export MINGBU_LAUNCHER="$0"
 mkdir -p "$MINGBU_HOME/data"
-exec "$PY" -I "$HERE/boot.py" "$HERE" >> "$MINGBU_HOME/data/运行日志.txt" 2>&1
+# boot.py 会把后台程序分离出去，然后这个 .app 马上结束（不会一直挂着“正在运行”）。
+# 再次双击时，新启动的程序发现后台已经在运行，就只打开一个新窗口。
+"$PY" -I "$HERE/boot.py" "$HERE" --detach < /dev/null >> "$MINGBU_HOME/data/运行日志.txt" 2>&1
+exit 0
