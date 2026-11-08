@@ -188,8 +188,15 @@ def list_vouchers(conn, pf, pt, keyword='', account='', status=''):
     q = ('SELECT v.*, (SELECT SUM(debit) FROM lines WHERE voucher_id = v.id) AS total, '
          '(SELECT summary FROM lines WHERE voucher_id = v.id ORDER BY seq LIMIT 1) AS first_summary, '
          '(SELECT COUNT(*) FROM lines WHERE voucher_id = v.id) AS line_count '
-         'FROM vouchers v WHERE v.period BETWEEN ? AND ?')
-    params = [int(pf), int(pt)]
+         'FROM vouchers v WHERE ')
+    # pf、pt 可以是期间整数（YYYYMM），也可以是日期（YYYY-MM-DD，凭证查询页面按日期查）
+    if '-' in str(pf) or '-' in str(pt):
+        from .ledger import _norm_date
+        q += 'v.date BETWEEN ? AND ?'
+        params = [_norm_date(pf or pt), _norm_date(pt or pf)]
+    else:
+        q += 'v.period BETWEEN ? AND ?'
+        params = [int(pf), int(pt)]
     if keyword:
         q += ' AND EXISTS (SELECT 1 FROM lines WHERE voucher_id = v.id AND summary LIKE ?)'
         params.append('%' + keyword + '%')
@@ -200,7 +207,7 @@ def list_vouchers(conn, pf, pt, keyword='', account='', status=''):
         q += ' AND v.audited = 0'
     elif status == 'audited':
         q += ' AND v.audited = 1'
-    q += ' ORDER BY v.period, v.number'
+    q += ' ORDER BY v.period, v.number'  # 同一期间按凭证号排
     return [dict(r) for r in conn.execute(q, params)]
 
 

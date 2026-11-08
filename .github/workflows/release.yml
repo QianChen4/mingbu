@@ -1,0 +1,39 @@
+# 发布：只有 main 上 app/__init__.py 里的版本号改了（也就是说了“发布”之后改的版本号）才会运行。
+# 打包 Windows 完整包、Mac 测试包和 latest.json，建一个 vX.Y.Z 的 Release。同一个版本号已经发布过就跳过。
+name: 发布
+on:
+  push:
+    branches: [main]
+    paths: ['app/__init__.py']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 读取版本号
+        id: v
+        run: |
+          V=$(python -c "import re;print(re.search(r\"VERSION\s*=\s*'([^']+)'\", open('app/__init__.py',encoding='utf-8').read()).group(1))")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if gh release view "v$V" >/dev/null 2>&1; then echo "exists=1" >> "$GITHUB_OUTPUT"; else echo "exists=0" >> "$GITHUB_OUTPUT"; fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: 测试
+        if: steps.v.outputs.exists == '0'
+        run: python -W ignore -m unittest discover -s tests -t .
+      - name: 打包
+        if: steps.v.outputs.exists == '0'
+        run: python tools/build.py
+      - name: 发布
+        if: steps.v.outputs.exists == '0'
+        run: |
+          gh release create "v${{ steps.v.outputs.version }}" dist/caiwu-jizhang-windows.zip dist/caiwu-jizhang-mac.zip dist/latest.json \
+            --title "明簿 v${{ steps.v.outputs.version }}" --notes "$(python -c "import json;print(json.load(open('dist/latest.json',encoding='utf-8'))['notes'] or '见更新记录.md')")"
+        env:
+          GH_TOKEN: ${{ github.token }}

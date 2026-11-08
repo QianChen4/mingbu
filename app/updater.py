@@ -1,27 +1,39 @@
 """
-软件更新：上传新版本的压缩包，替换程序文件（app、web、启动文件、说明），
-data（账套数据）和 backups（备份）文件夹不会被改动。替换前会自动备份所有账套和旧版程序。
+软件更新（v1.8 起改为“完整包 + 版本文件夹”）。
+
+为什么改：以前的更新只替换 app、web 两个文件夹，启动程序、运行环境、图标都还是旧的；
+更新包也不是完整的软件，拷到别的电脑上不能直接用。
+
+现在：
+- 完整安装包和更新包是同一个文件（Windows：caiwu-jizhang-windows.zip；Mac：caiwu-jizhang-mac.zip）。
+  解压就能用；在“设置 → 软件更新”里选中它就是离线更新；在线更新下载的也是它。
+- 每个版本装在软件文件夹的 versions/v版本号 里，是一套完整的程序（Windows 还带运行环境）。
+  新版本先完整解压、检查能正常启动，再把 versions/current.txt 改成新版本号——
+  中途出错、断电都不会弄坏正在用的版本。只保留“当前版本 + 上一个版本”，可以一键退回上一个版本。
+- 启动程序“明簿.exe”也一起换新（老名字“财务记账软件.exe”同样换成新的，老快捷方式照常能用）。
+- 账套数据在 data 文件夹，更新时不动；更新前照常自动备份所有账套。
+- 在线下载支持断点续传：网络断了从断点接着下，每个下载地址自动重试几次，再换下一个地址。
 """
 import datetime
-import io
-import os
-import re
-import stat
-import zipfile
-
 import hashlib
 import hmac
+import io
 import json
+import os
+import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
+import zipfile
 
-from . import VERSION, UPDATE_URL
-from .db import AppError, ROOT, BACKUP_DIR, DATA_DIR, list_companies, backup_company
+from . import VERSION, UPDATE_URL, paths
+from .db import AppError, BACKUP_DIR, DATA_DIR, list_companies, backup_company
 
-# 只允许更新这些位置的文件
-ALLOWED_TOP = ('app/', 'web/')
-ALLOWED_FILES = ('start.py', '使用说明.md', '开发说明.md', '更新记录.md')
+# 在线更新时用于下载临时文件的文件夹（断点续传的半截文件也放在这里）
+DOWNLOAD_DIR = os.path.join(BACKUP_DIR, '下载')
 
 
 # ---------------------------------------------------------------- 进度
@@ -29,10 +41,10 @@ ALLOWED_FILES = ('start.py', '使用说明.md', '开发说明.md', '更新记录
 # 当前步骤、正在用哪个下载地址，以及每一步的提示（例如“ghfast.top 连接超时，换下一个”）。
 
 STAGES = {
-    'online': [('manifest', '获取更新信息'), ('download', '下载更新包'), ('verify', '校验 sha256'),
-               ('backup', '备份账套和旧版程序'), ('install', '安装（替换程序文件）'), ('restart', '重新打开软件')],
-    'file': [('check', '检查更新包'), ('backup', '备份账套和旧版程序'),
-             ('install', '安装（替换程序文件）'), ('restart', '重新打开软件')],
+    'online': [('manifest', '获取更新信息'), ('download', '下载'), ('verify', '校验 sha256'),
+               ('backup', '备份账套'), ('install', '安装新版本'), ('restart', '重新打开软件')],
+    'file': [('check', '检查安装包'), ('backup', '备份账套'), ('install', '安装新版本'), ('restart', '重新打开软件')],
+    'rollback': [('install', '切换版本'), ('restart', '重新打开软件')],
 }
 
 
@@ -45,11 +57,13 @@ class Progress:
                   'stage': STAGES[kind][0][0], 'message': '', 'source': '', 'done': 0, 'total': 0,
                   'speed': 0, 'log': [], 'error': '', 'result': None, 'started': time.time()}
         self._t0 = time.time()
+        self._b0 = 0
 
     def stage(self, key, message=''):
         with self._lock:
             self.d.update(stage=key, message=message, done=0, total=0, speed=0)
             self._t0 = time.time()
+            self._b0 = 0
 
     def message(self, message, source=None):
         with self._lock:
@@ -57,18 +71,20 @@ class Progress:
             if source is not None:
                 self.d['source'] = source
 
-    def bytes(self, done, total=None):
+    def bytes(self, done, total=None, start=None):
         with self._lock:
+            if start is not None:  # 断点续传：速度只按这次新下载的部分算
+                self._t0, self._b0 = time.time(), start
             self.d['done'] = done
             if total is not None:
                 self.d['total'] = total
             dt = time.time() - self._t0
-            self.d['speed'] = int(done / dt) if dt > 0.2 else 0
+            self.d['speed'] = int((done - self._b0) / dt) if dt > 0.2 else 0
 
     def log(self, text):
         with self._lock:
             self.d['log'].append('%s  %s' % (datetime.datetime.now().strftime('%H:%M:%S'), text))
-            del self.d['log'][:-50]
+            del self.d['log'][:-60]
 
     def finish(self, result=None, error=''):
         with self._lock:
@@ -76,7 +92,7 @@ class Progress:
             self.d['error'] = error
             self.d['result'] = result
             if not error:
-                self.d.update(stage='restart', message='更新完成，请点右上角“退出软件”，然后重新打开软件')
+                self.d.update(stage='restart', message='新版本已经装好，点“立即重启”就会用新版本打开')
 
     def snapshot(self):
         with self._lock:
@@ -95,8 +111,13 @@ def job_status():
     return j.snapshot() if j else {'state': 'idle'}
 
 
+def busy():
+    j = _job
+    return bool(j and j.d['state'] == 'running')
+
+
 def start_job(kind, arg):
-    """在后台开始更新。kind='online' 时 arg 是更新地址；kind='file' 时 arg 是更新包内容。"""
+    """在后台开始更新。kind='online' 时 arg 是更新地址；'file' 时 arg 是安装包内容；'rollback' 时 arg 不用。"""
     global _job
     with _job_lock:
         if _job and _job.d['state'] == 'running':
@@ -106,7 +127,12 @@ def start_job(kind, arg):
 
     def run():
         try:
-            r = update_online(arg, p) if kind == 'online' else apply_update(arg, p)
+            if kind == 'online':
+                r = update_online(arg, p)
+            elif kind == 'rollback':
+                r = rollback(p)
+            else:
+                r = apply_update(arg, p)
             p.finish(r)
         except AppError as e:
             p.log('失败：%s' % e)
@@ -115,79 +141,169 @@ def start_job(kind, arg):
             import traceback
             traceback.print_exc()
             p.log('程序出错：%s' % e)
-            p.finish(error='更新时程序出错：%s。账套数据和旧版程序已在开始安装前备份，可以稍后重试' % e)
+            p.finish(error='更新时程序出错：%s。正在用的版本没有改动，账套数据也已备份，可以稍后重试' % e)
 
     threading.Thread(target=run, daemon=True).start()
     return p.snapshot()
 
 
+# ---------------------------------------------------------------- 安装包
+
+LAUNCHER_NAMES = ('明簿.exe',)
+LEGACY_LAUNCHER = '财务记账软件.exe'
+
+
+def _vtuple(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v or '0')[:4])
+
+
 def _find_prefix(names):
+    """找到程序所在的位置（里面有 app/server.py、web/index.html、start.py）。"""
+    best = None
     for n in names:
         if n.endswith('app/server.py'):
             prefix = n[:-len('app/server.py')]
             if prefix + 'web/index.html' in names and prefix + 'start.py' in names:
-                return prefix
-    raise AppError('这不是本软件的安装包：压缩包中找不到 app/server.py、web/index.html 和 start.py')
+                if best is None or len(prefix) < len(best):
+                    best = prefix
+    if best is None:
+        raise AppError('这不是明簿的安装包：压缩包里找不到 app/server.py、web/index.html 和 start.py。'
+                       '请选择从发布页面下载的 caiwu-jizhang-windows.zip（Mac 用 caiwu-jizhang-mac.zip）')
+    return best
 
 
 def _read_version(z, prefix):
     try:
         txt = z.read(prefix + 'app/__init__.py').decode('utf-8')
         m = re.search(r"VERSION\s*=\s*['\"]([^'\"]+)['\"]", txt)
-        return m.group(1) if m else '未知'
+        return m.group(1) if m else ''
     except KeyError:
-        return '未知'
+        return ''
 
 
-def _backup_current_code():
-    folder = os.path.join(BACKUP_DIR, '旧版本程序')
-    os.makedirs(folder, exist_ok=True)
-    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    path = os.path.join(folder, 'v%s-%s.zip' % (VERSION, stamp))
-    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
-        for top in ('app', 'web'):
-            for root, dirs, files in os.walk(os.path.join(ROOT, top)):
-                dirs[:] = [d for d in dirs if d != '__pycache__']
-                for f in files:
-                    full = os.path.join(root, f)
-                    z.write(full, os.path.relpath(full, ROOT))
-        for f in ALLOWED_FILES:
-            full = os.path.join(ROOT, f)
-            if os.path.exists(full):
-                z.write(full, f)
-    return path
+def _safe_rel(rel):
+    parts = rel.replace('\\', '/').split('/')
+    return not (rel.startswith('/') or '..' in parts or ':' in parts[0] or '__pycache__' in parts)
 
 
-def apply_update(data, progress=None):
-    p = progress or Progress('file')
-    if p.d['kind'] == 'file':
-        p.stage('check', '正在检查更新包…')
-    else:
-        p.message('正在检查更新包…')
+def inspect_package(data):
+    """检查安装包，返回 (zipfile, 信息)。"""
     try:
-        z = zipfile.ZipFile(io.BytesIO(data))
+        z = zipfile.ZipFile(io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else data)
     except zipfile.BadZipFile:
-        raise AppError('文件不是有效的压缩包')
+        raise AppError('文件不是有效的压缩包（可能没下载完整）')
     names = z.namelist()
     prefix = _find_prefix(names)
-    new_version = _read_version(z, prefix)
-    if new_version != '未知' and _vtuple(new_version) < _vtuple(VERSION):
-        raise AppError('压缩包里是旧版本（v%s），比现在的版本（v%s）还旧，不能用来更新' % (new_version, VERSION))
+    version = _read_version(z, prefix)
+    if not version:
+        raise AppError('安装包里找不到版本号（app/__init__.py）')
+    # 新结构：<根>/versions/v1.8.0/…；根目录下还有启动程序和说明
+    m = re.match(r'^(.*?)versions/[^/]+/$', prefix)
+    root = m.group(1) if m else prefix
+    launcher = next((root + n for n in LAUNCHER_NAMES if root + n in names), None)
+    docs = [n for n in names if n.startswith(root) and n.endswith('.md') and '/' not in n[len(root):]]
+    has_runtime = any(n.startswith(prefix + 'runtime/') for n in names)
+    return z, {'version': version, 'prefix': prefix, 'root': root, 'launcher': launcher, 'docs': docs,
+               'has_runtime': has_runtime, 'files': sum(1 for n in names if n.startswith(prefix) and not n.endswith('/'))}
 
-    members = []
-    for n in names:
-        if not n.startswith(prefix) or n.endswith('/'):
-            continue
-        rel = n[len(prefix):]
-        if '..' in rel.split('/') or rel.startswith('/') or '__pycache__' in rel:
-            continue
-        if rel.startswith(ALLOWED_TOP) or rel in ALLOWED_FILES:
-            members.append((n, rel))
-    if not members:
-        raise AppError('压缩包里没有可更新的文件')
-    p.log('更新包检查通过：v%s，共 %d 个程序文件' % (new_version, len(members)))
 
-    # 先备份：所有账套 + 旧版程序
+def _legacy_runtime_dir(home):
+    """老结构（v1.7 及以前）的运行环境：软件文件夹里的 runtime-x86 / runtime-x64。"""
+    for name in ('runtime-x86', 'runtime-x64', 'runtime'):
+        d = os.path.join(home, name)
+        if os.path.isfile(os.path.join(d, 'pythonw.exe')):
+            return d
+    return None
+
+
+def _current_runtime_dir():
+    """正在用的运行环境：Windows 新结构在版本文件夹的 runtime 里。"""
+    d = os.path.dirname(sys.executable)
+    return d if os.path.isfile(os.path.join(d, 'pythonw.exe')) else None
+
+
+def current_version_name(home):
+    try:
+        with open(os.path.join(home, paths.VERSIONS, paths.CURRENT_FILE), encoding='utf-8-sig') as f:
+            v = f.read().strip()
+        return v if re.fullmatch(r'v[\w.\-]+', v) else ''
+    except OSError:
+        return ''
+
+
+def installed_versions(home):
+    d = os.path.join(home, paths.VERSIONS)
+    try:
+        names = [n for n in os.listdir(d) if re.fullmatch(r'v\d[\w.\-]*', n)
+                 and os.path.isfile(os.path.join(d, n, 'start.py'))]
+    except OSError:
+        return []
+    return sorted(names, key=_vtuple, reverse=True)
+
+
+def _write_current(home, vname):
+    d = os.path.join(home, paths.VERSIONS)
+    tmp = os.path.join(d, paths.CURRENT_FILE + '.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(vname + '\n')
+    os.replace(tmp, os.path.join(d, paths.CURRENT_FILE))
+
+
+def _rmtree(path):
+    def onerror(func, p, exc):
+        try:
+            os.chmod(p, 0o700)
+            func(p)
+        except OSError:
+            pass
+    shutil.rmtree(path, onerror=onerror)
+
+
+def _self_test(vdir, home, is_windows):
+    """用新版本自己的运行环境试着加载一次程序，确认能启动。加载失败就不切换过去。"""
+    if is_windows:
+        py = os.path.join(vdir, 'runtime', 'python.exe')
+        if not os.path.isfile(py):
+            return None
+    else:
+        py = sys.executable
+    code = ('import sys; sys.path.insert(0, sys.argv[1]); import app, app.server; '
+            'print("ok", app.VERSION)')
+    env = dict(os.environ)
+    env['MINGBU_HOME'] = home
+    env.pop('PYTHONPATH', None)
+    kw = {}
+    if os.name == 'nt':
+        kw['creationflags'] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        r = subprocess.run([py, '-I' if not is_windows else '-s', '-c', code, vdir], cwd=vdir, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, **kw)
+    except (OSError, subprocess.SubprocessError) as e:
+        return '无法运行新版本的程序：%s' % e
+    if r.returncode != 0 or b'ok' not in r.stdout:
+        err = (r.stderr or b'').decode('utf-8', 'replace').strip().splitlines()
+        return '新版本试运行失败：%s' % (err[-1] if err else '未知原因')
+    return None
+
+
+def install_package(data, home=None, progress=None, is_windows=None, allow_same=False, self_test=True):
+    """把安装包装进 home/versions/v版本号，并切换过去。返回结果信息。
+
+    home：软件文件夹，默认是正在运行的这个；is_windows：按哪个平台安装（测试时可以指定）。"""
+    p = progress or Progress('file')
+    home = home or paths.HOME
+    is_windows = (os.name == 'nt') if is_windows is None else is_windows
+    p.stage('check', '正在检查安装包…') if p.d['kind'] == 'file' else p.message('正在检查安装包…')
+    z, info = inspect_package(data)
+    new_v = info['version']
+    if _vtuple(new_v) < _vtuple(VERSION) and not allow_same:
+        raise AppError('压缩包里是旧版本（v%s），比现在的版本（v%s）还旧，不能用来更新。'
+                       '想退回上一个版本请用“退回上一个版本”' % (new_v, VERSION))
+    if is_windows and not info['has_runtime'] and not (_current_runtime_dir() or _legacy_runtime_dir(home)):
+        raise AppError('这个压缩包里没有运行环境，请用 Windows 完整安装包（caiwu-jizhang-windows.zip）')
+    p.log('安装包检查通过：v%s，共 %d 个文件' % (new_v, info['files']))
+
+    # 1. 备份所有账套
     p.stage('backup', '正在备份账套…')
     companies = [c for c in list_companies() if not c.get('broken')]
     for i, c in enumerate(companies):
@@ -195,38 +311,148 @@ def apply_update(data, progress=None):
         p.bytes(i, len(companies))
         try:
             backup_company(c['id'], '更新前备份')
-        except AppError as e:
-            raise AppError('备份账套“%s”失败，已停止更新，程序文件没有改动：%s' % (c.get('name') or c['id'], e))
-        except OSError as e:
-            raise AppError('备份账套“%s”失败（%s），已停止更新，程序文件没有改动。'
-                           '请检查硬盘空间是否足够' % (c.get('name') or c['id'], e))
-    p.message('正在备份旧版程序…')
-    try:
-        old_code = _backup_current_code()
-    except OSError as e:
-        raise AppError('备份旧版程序失败（%s），已停止更新，程序文件没有改动。请检查硬盘空间是否足够' % e)
-    p.log('已备份 %d 个账套和旧版程序' % len(companies))
+        except (AppError, OSError) as e:
+            raise AppError('备份账套“%s”失败，已停止更新，正在用的版本没有改动：%s' % (c.get('name') or c['id'], e))
+    p.log('已备份 %d 个账套' % len(companies))
 
-    p.stage('install', '正在替换程序文件…')
-    for i, (n, rel) in enumerate(members):
-        p.bytes(i, len(members))
-        target = os.path.normpath(os.path.join(ROOT, rel))
-        if not target.startswith(ROOT) or target.startswith(DATA_DIR) or target.startswith(BACKUP_DIR):
-            continue
-        try:
+    # 2. 解压到 versions/v版本号.part
+    p.stage('install', '正在解压新版本…')
+    vname = 'v' + new_v
+    vroot = os.path.join(home, paths.VERSIONS)
+    os.makedirs(vroot, exist_ok=True)
+    part = os.path.join(vroot, vname + '.part')
+    if os.path.exists(part):
+        _rmtree(part)
+    members = [n for n in z.namelist() if n.startswith(info['prefix']) and not n.endswith('/')]
+    try:
+        for i, n in enumerate(members):
+            rel = n[len(info['prefix']):]
+            if not _safe_rel(rel):
+                continue
+            target = os.path.join(part, *rel.split('/'))
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, 'wb') as f:
+            with z.open(n) as src, open(target, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+            if i % 20 == 0:
+                p.bytes(i, len(members))
+        p.bytes(len(members), len(members))
+        if is_windows and not os.path.isfile(os.path.join(part, 'runtime', 'pythonw.exe')):
+            src_rt = _current_runtime_dir() or _legacy_runtime_dir(home)
+            p.log('安装包里没有运行环境，沿用现在的运行环境')
+            shutil.copytree(src_rt, os.path.join(part, 'runtime'))
+    except OSError as e:
+        _rmtree(part)
+        raise AppError('解压新版本时出错（%s）。可能是硬盘空间不够或没有写入权限；正在用的版本没有改动' % e)
+
+    # 3. 试运行
+    if self_test:
+        p.message('正在检查新版本能否正常启动…')
+        err = _self_test(part, home, is_windows)
+        if err:
+            _rmtree(part)
+            raise AppError(err + '。没有切换到新版本，正在用的版本没有改动')
+        p.log('新版本试运行正常')
+
+    # 4. 放到正式位置
+    final = os.path.join(vroot, vname)
+    running_here = os.path.normcase(os.path.abspath(final)) == os.path.normcase(paths.CODE_DIR)
+    if os.path.exists(final):
+        if running_here:
+            _rmtree(part)
+            raise AppError('v%s 就是正在使用的版本，不需要重新安装' % new_v)
+        old = final + '.old-%d' % int(time.time())
+        os.rename(final, old)
+        _rmtree(old)
+    os.rename(part, final)
+
+    # 5. 启动程序和说明文档
+    notes = []
+    if is_windows and info['launcher']:
+        exe = z.read(info['launcher'])
+        for name in LAUNCHER_NAMES + (LEGACY_LAUNCHER,):
+            target = os.path.join(home, name)
+            if name != LAUNCHER_NAMES[0] and not os.path.exists(target):
+                continue  # 老名字的启动程序只在原来就有时才替换（让老快捷方式照常能用）
+            try:
+                with open(target + '.new', 'wb') as f:
+                    f.write(exe)
+                os.replace(target + '.new', target)
+            except OSError as e:
+                notes.append('启动程序 %s 没能替换（%s），下次更新时会再试' % (name, e))
+        p.log('启动程序已更新')
+    for n in info['docs']:
+        try:
+            with open(os.path.join(home, n[len(info['root']):]), 'wb') as f:
                 f.write(z.read(n))
-        except OSError as e:
-            raise AppError('替换文件 %s 时出错（%s）。可能是文件被占用或没有写入权限；'
-                           '旧版程序已备份在 %s，可以用它恢复，或关闭软件后重新打开再试'
-                           % (rel, e, os.path.relpath(old_code, ROOT)))
-        if rel.endswith('.command'):
-            os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    p.bytes(len(members), len(members))
-    p.log('已替换 %d 个文件，从 v%s 更新到 v%s' % (len(members), VERSION, new_version))
-    return {'old_version': VERSION, 'new_version': new_version, 'files': len(members),
-            'code_backup': os.path.relpath(old_code, ROOT)}
+        except OSError:
+            pass
+
+    # 6. 切换版本，清理更早的版本（只留当前和上一个）
+    prev = current_version_name(home) or (os.path.basename(paths.CODE_DIR) if paths.LAYOUT == 'versioned' else '')
+    _write_current(home, vname)
+    p.log('已切换到 v%s' % new_v)
+    keep = {vname, prev, os.path.basename(paths.CODE_DIR)}
+    for n in os.listdir(vroot):
+        full = os.path.join(vroot, n)
+        if os.path.isdir(full) and n not in keep and n != paths.VERSIONS:
+            if re.fullmatch(r'v\d[\w.\-]*', n) or '.part' in n or '.old-' in n:
+                _rmtree(full)
+    for n in notes:
+        p.log(n)
+    return {'old_version': VERSION, 'new_version': new_v, 'files': len(members), 'notes': notes}
+
+
+def apply_update(data, progress=None):
+    """离线更新：选中的完整安装包。"""
+    return install_package(data, progress=progress)
+
+
+def rollback(progress=None):
+    """退回上一个版本：把 current.txt 改回上一个版本文件夹。"""
+    p = progress or Progress('rollback')
+    home = paths.HOME
+    cur = current_version_name(home) or os.path.basename(paths.CODE_DIR)
+    others = [v for v in installed_versions(home) if v != cur]
+    if paths.LAYOUT != 'versioned' or not others:
+        raise AppError('没有可以退回的上一个版本')
+    target = others[0]
+    p.stage('install', '正在切换到 %s…' % target)
+    _write_current(home, target)
+    p.log('已切换到 %s，重启后生效' % target)
+    return {'old_version': VERSION, 'new_version': target.lstrip('v'), 'rollback': True}
+
+
+def version_info():
+    home = paths.HOME
+    cur = current_version_name(home)
+    return {'version': VERSION, 'layout': paths.LAYOUT, 'home': home, 'current': cur,
+            'installed': installed_versions(home),
+            'can_rollback': paths.LAYOUT == 'versioned' and any(v != (cur or 'v' + VERSION)
+                                                               for v in installed_versions(home)),
+            'pending_restart': bool(cur) and cur != 'v' + VERSION and paths.LAYOUT == 'versioned',
+            'platform': 'windows' if os.name == 'nt' else ('mac' if sys.platform == 'darwin' else 'other')}
+
+
+def cleanup_legacy():
+    """从老结构（app、web 直接放在软件文件夹里）更新到版本文件夹后，把老结构留下的程序文件移到 backups 里，
+    免得以后分不清用的是哪个。只在新结构下运行；账套数据不动。"""
+    if paths.LAYOUT != 'versioned':
+        return []
+    home = paths.HOME
+    olds = [n for n in ('app', 'web', 'start.py', 'runtime-x86', 'runtime-x64', 'pylib', '开发说明.md')
+            if os.path.exists(os.path.join(home, n))]
+    if not ('app' in olds and 'start.py' in olds):
+        return []
+    dest = os.path.join(BACKUP_DIR, '旧版本程序', '老版本文件-%s' % datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    moved = []
+    for n in olds:
+        try:
+            os.makedirs(dest, exist_ok=True)
+            shutil.move(os.path.join(home, n), os.path.join(dest, n))
+            moved.append(n)
+        except (OSError, shutil.Error):
+            pass
+    return moved
 
 
 # ---------------------------------------------------------------- 在线更新
@@ -303,10 +529,6 @@ def auto_check():
             'notes': r.get('notes', '')}
 
 
-def _vtuple(v):
-    return tuple(int(x) for x in re.findall(r'\d+', v or '0')[:4])
-
-
 def _quote_url(url):
     """网址里有中文（如文件名）时转成 %xx 编码。"""
     import urllib.parse
@@ -349,7 +571,7 @@ def _mb(n):
 
 
 def _fetch(url, limit=200 * 1024 * 1024, timeout=30, progress=None):
-    req = urllib.request.Request(_quote_url(url), headers={'User-Agent': 'CaiwuJizhang/%s' % VERSION})
+    req = urllib.request.Request(_quote_url(url), headers={'User-Agent': 'Mingbu/%s' % VERSION})
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
     except Exception as e:
@@ -460,7 +682,7 @@ def _fetch_manifest(url, need_confirm=False, progress=None):
         got = [(src, info) for src, info in ex.map(get, sources[1:]) if info is not None]
     if not got:
         raise AppError('无法连接更新地址（GitHub 直连和 %d 个国内加速地址都连不上）。'
-                       '请检查网络后重试，或下载更新包后用“方法一”安装。%s'
+                       '请检查网络后重试，或下载安装包后用“从文件更新”安装。%s'
                        % (len(sources) - 1, errors[0] if errors else ''))
     groups = {}
     for src, info in got:
@@ -470,7 +692,7 @@ def _fetch_manifest(url, need_confirm=False, progress=None):
     p.log('已从加速地址取得更新信息：%s' % '、'.join(_short(x[0]) for x in ok))
     if need_confirm and len(ok) < 2:
         raise AppError('GitHub 连不上，能用的加速地址只有一个（%s），无法交叉确认更新信息的真实性，'
-                       '为安全起见已停止。请稍后重试，或下载更新包后用“方法一”安装' % ok[0][0])
+                       '为安全起见已停止。请稍后重试，或下载安装包后用“从文件更新”安装' % ok[0][0])
     return info, ok
 
 
@@ -492,54 +714,158 @@ def check_online(url):
     return _summary(*_fetch_manifest(url))
 
 
+def _platform_entry(info):
+    """latest.json 里按平台取下载地址：顶层的 url/sha256 是 Windows 完整包（老版本软件也认这个），
+    "mac": {"url", "sha256", "size"} 是 Mac 包。"""
+    if sys.platform == 'darwin':
+        m = info.get('mac')
+        if not isinstance(m, dict) or not m.get('url'):
+            raise AppError('这次发布没有 Mac 版')
+        return m
+    return info
+
+
+def _download(url, dest, want_size, progress, label, attempts=3, timeout=30):
+    """下载到 dest，支持断点续传：dest 已经有一部分就从那里接着下。每个地址最多试 attempts 次。
+    返回 True 表示下载完整；连不上或一直断返回错误信息。"""
+    p = progress
+    last = ''
+    for attempt in range(1, attempts + 1):
+        have = os.path.getsize(dest) if os.path.exists(dest) else 0
+        if want_size and have >= want_size:
+            return True, ''
+        headers = {'User-Agent': 'Mingbu/%s' % VERSION}
+        if have:
+            headers['Range'] = 'bytes=%d-' % have
+        req = urllib.request.Request(_quote_url(url), headers=headers)
+        try:
+            r = urllib.request.urlopen(req, timeout=timeout)
+        except Exception as e:
+            import urllib.error
+            if isinstance(e, urllib.error.HTTPError) and e.code == 416 and have:
+                return True, ''  # 服务器说“已经下完了”
+            last = _net_error(e)
+            p.log('%s 第 %d 次连接失败：%s' % (label, attempt, last))
+            if attempt < attempts:
+                time.sleep(min(2 ** attempt, 8))
+            continue
+        with r:
+            status = getattr(r, 'status', 200)
+            if have and status != 206:
+                have = 0  # 这个地址不支持断点续传，从头下载
+            try:
+                length = int(r.headers.get('Content-Length') or 0)
+            except ValueError:
+                length = 0
+            total = want_size or (have + length if length else 0)
+            if have:
+                p.log('从 %s 断点续传：已有 %s，接着下载' % (label, _mb(have)))
+            p.bytes(have, total, start=have)
+            got = have
+            try:
+                with open(dest, 'ab' if have else 'wb') as f:
+                    while True:
+                        chunk = r.read(64 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        got += len(chunk)
+                        if got > 500 * 1024 * 1024:
+                            raise AppError('下载的文件太大')
+                        p.bytes(got)
+            except AppError:
+                raise
+            except Exception as e:
+                last = '下载到一半中断了（已下载 %s%s）：%s' % (_mb(got), ' / 共 %s' % _mb(total) if total else '',
+                                                    _net_error(e))
+                p.log('%s：%s' % (label, last))
+                if attempt < attempts:
+                    time.sleep(min(2 ** attempt, 8))
+                continue
+        if total and got < total:
+            last = '下载不完整（只收到 %s，应为 %s）' % (_mb(got), _mb(total))
+            p.log('%s：%s，再试一次' % (label, last))
+            continue
+        return True, ''
+    return False, last
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def update_online(url, progress=None):
     p = progress or Progress()
     p.stage('manifest', '正在获取更新信息…')
     manifest, srcs = _fetch_manifest(url, need_confirm=True, progress=p)  # 只取一次，版本判断和校验用同一份内容
     if not _summary(manifest)['has_update']:
         raise AppError('已经是最新版本（%s）' % VERSION)
-    if not manifest.get('url'):
+    entry = _platform_entry(manifest)
+    if not entry.get('url'):
         raise AppError('更新信息里没有下载地址')
-    want = str(manifest.get('sha256') or '').strip().lower()
+    want = str(entry.get('sha256') or '').strip().lower()
     if not re.fullmatch(r'[0-9a-f]{64}', want):
         raise AppError('更新信息里缺少有效的 sha256 校验值，为安全起见已停止更新。'
-                       '请联系发布者，或下载更新包后用“离线更新”安装')
+                       '请联系发布者，或下载安装包后用“从文件更新”安装')
+    try:
+        want_size = int(entry.get('size') or 0)
+    except ValueError:
+        want_size = 0
     import urllib.parse
-    # 下载地址可以写相对于 latest.json 的路径；按能连上的来源依次尝试，每个都要通过 sha256 校验
-    # 更新信息已经确认过，安装包有 sha256 把关，所以下载可以再试其余加速地址
     p.log('找到新版本 v%s（当前 v%s）' % (manifest['version'], VERSION))
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    dest = os.path.join(DOWNLOAD_DIR, want[:16] + '.part')
+    # 清理以前没下完的其他版本
+    for n in os.listdir(DOWNLOAD_DIR):
+        if n.endswith('.part') and n != os.path.basename(dest):
+            try:
+                os.remove(os.path.join(DOWNLOAD_DIR, n))
+            except OSError:
+                pass
+    # 下载地址可以写相对于 latest.json 的路径；能连上 latest.json 的来源排在前面，其余加速地址作为后备
     tried = srcs + [x for x in _sources(url) if x not in srcs]
     last = None
     for k, (name, base) in enumerate(tried):
         i = base.find(GITHUB)
         if i >= 0:  # 加速地址：先和 GitHub 原网址拼好，再加上同一个加速前缀
-            dl = urllib.parse.urljoin(base[i:], manifest['url'])
+            dl = urllib.parse.urljoin(base[i:], entry['url'])
             if dl.startswith(GITHUB):
                 dl = base[:i] + dl
         else:
-            dl = urllib.parse.urljoin(base, manifest['url'])
+            dl = urllib.parse.urljoin(base, entry['url'])
         if name == '直连':
             label = 'GitHub' if base.startswith(GITHUB) else urllib.parse.urlsplit(base).netloc
         else:
             label = _short(name) if name != '自定义' else urllib.parse.urlsplit(base).netloc
         p.stage('download', '正在从 %s 下载（第 %d 个下载地址，共 %d 个）' % (label, k + 1, len(tried)))
         p.message('正在从 %s 下载（第 %d 个下载地址，共 %d 个）' % (label, k + 1, len(tried)), label)
-        try:
-            data = _fetch(dl, progress=p)
-        except AppError as e:
-            p.log('%s 下载失败：%s%s' % (label, str(e).replace('无法连接更新地址：', ''),
-                                    '，换下一个地址' if k + 1 < len(tried) else ''))
-            last = last or e  # 校验失败的提示更重要，不被后面的连接失败覆盖
+        ok, err = _download(dl, dest, want_size, p, label)
+        if not ok:
+            p.log('%s 下载失败：%s%s' % (label, err, '，换下一个地址' if k + 1 < len(tried) else ''))
+            last = last or AppError(err)
             continue
-        p.log('从 %s 下载完成，%s' % (label, _mb(len(data))))
         p.stage('verify', '正在校验 sha256…')
-        if hmac.compare_digest(hashlib.sha256(data).hexdigest(), want):
-            p.log('sha256 校验通过')
-            return apply_update(data, p)
+        if hmac.compare_digest(_sha256_file(dest), want):
+            p.log('下载完成（%s），sha256 校验通过' % _mb(os.path.getsize(dest)))
+            try:
+                with open(dest, 'rb') as f:
+                    result = install_package(f.read(), progress=p)
+            finally:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+            return result
         p.log('%s 下载的文件 sha256 校验不通过（文件不完整或被修改），已丢弃%s'
               % (label, '，换下一个地址' if k + 1 < len(tried) else ''))
-        last = AppError('下载的更新包校验失败（文件不完整或被修改），为安全起见没有安装，请稍后重试')
-    if 'sha256' not in str(last) and '校验' not in str(last):
-        last = AppError('所有下载地址（%d 个）都没能下载成功，最后一个错误：%s。请检查网络后重试，'
-                        '或下载更新包后用“方法一”安装' % (len(tried), str(last).replace('无法连接更新地址：', '')))
+        os.remove(dest)
+        last = AppError('下载的安装包校验失败（文件不完整或被修改），为安全起见没有安装，请稍后重试')
+    if last is None or ('sha256' not in str(last) and '校验' not in str(last)):
+        last = AppError('所有下载地址（%d 个）都没能下载完整，最后一个错误：%s。已下载的部分会保留，'
+                        '再点一次“检查更新”会从断点接着下载；也可以下载安装包后用“从文件更新”安装'
+                        % (len(tried), str(last or '未知错误')))
     raise last

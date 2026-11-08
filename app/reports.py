@@ -13,8 +13,8 @@
 用户自建的一级科目，可以在科目设置里指定“报表项目”；没有指定的归入兜底行，保证报表平衡。
 """
 from .db import AppError, company_profile
-from .ledger import (account_map, leaf_end_balances, leaf_begin_balances, opening_rows, prev_period,
-                     next_period, start_period, plabel, normalize_range, check_period, range_label)
+from .ledger import (account_map, opening_rows, start_period, start_date, date_range, date_label, year_first,
+                     balances_before, balances_through, LINES_DATED)
 
 
 def T(kind, key, k=1):
@@ -243,17 +243,13 @@ def _bs_term_text(t, keymap, accts):
 # ---------------------------------------------------------------- 资产负债表
 
 
-def balance_sheet(conn, pf, pt=None):
-    """资产负债表：pt 期末余额，与 pf 期初余额对比（pf 为 1 月时即“年初余额”）。"""
-    if pt is None:
-        pt = pf
-        pf = (int(pf) // 100) * 100 + 1
-    pf, pt = check_period(pf), check_period(pt)
-    if pf > pt:
-        raise AppError('起始期间（%s）不能晚于结束期间（%s）' % (plabel(pf), plabel(pt)))
-    sp = start_period(conn)
-    if pt < sp:
-        raise AppError('报表期间早于账套启用期间 %s' % plabel(sp))
+def balance_sheet(conn, d1, d2=None):
+    """资产负债表：期初余额（起始日期当天开始前）在前，期末余额（结束日期当天结束时）在后。
+    起始日期是 1 月 1 日时期初余额就是“年初余额”。d1、d2 也可以传期间整数。"""
+    if d2 is None:
+        d2 = d1
+        d1 = str(d1)[:4] + '-01-01' if '-' in str(d1) else (int(d1) // 100) * 100 + 1
+    d1, d2, _raw = date_range(conn, d1, d2)
     fmt, keymap = _fmt(conn)
     accts = account_map(conn)
     # (key, name, side, group, terms, hide0) —— 把关键字换成科目编码，找不到的取数项忽略
@@ -306,8 +302,8 @@ def balance_sheet(conn, pf, pt=None):
                 vals[key] = sum(vals[k] * f for k, f in _sum_parts(terms))
         return vals
 
-    end_vals = evaluate(leaf_end_balances(conn, pt))
-    begin_vals = evaluate(leaf_begin_balances(conn, pf))
+    end_vals = evaluate(balances_through(conn, d2, accts))
+    begin_vals = evaluate(balances_before(conn, d1, accts))
     rows = []
     for key, name, side, group, terms, hide0, memo in items:
         if hide0 and not end_vals[key] and not begin_vals[key]:
@@ -323,32 +319,30 @@ def balance_sheet(conn, pf, pt=None):
         'end_diff': end_vals['assets'] - end_vals['le_total'],
         'begin_diff': begin_vals['assets'] - begin_vals['le_total'],
     }
-    sy = sp // 100
-    if pf % 100 == 1 or pf <= sy * 100 + 1:
+    sd = start_date(conn)
+    if d1[5:] == '01-01' or d1 <= sd[:4] + '-01-01':
         begin_label = '年初余额'
-    elif pf <= sp:
-        begin_label = '期初余额（%s初）' % plabel(sp)
     else:
-        begin_label = '期初余额（%s初）' % plabel(pf)
-    return {'period': pt, 'from': pf, 'to': pt, 'label': '%s末' % plabel(pt), 'begin_label': begin_label,
-            'form_no': fmt['bs_no'], 'rows': rows, 'checks': checks}
+        begin_label = '期初余额'
+    return {'from': d1, 'to': d2, 'label': date_label(d1, d2), 'begin_label': begin_label,
+            'end_label': '期末余额', 'form_no': fmt['bs_no'], 'rows': rows, 'checks': checks}
 
 
 # ---------------------------------------------------------------- 利润表
 
 
-def pl_signed(conn, pf, pt):
-    """损益类末级科目在区间内的发生额（借减贷），排除“结转损益”凭证。"""
+def pl_signed(conn, d1, d2):
+    """损益类末级科目在 [d1, d2] 日期内的发生额（借减贷），排除“结转损益”凭证。"""
     out = {}
-    q = ('SELECT l.account_code, SUM(l.debit - l.credit) FROM lines l JOIN vouchers v ON v.id = l.voucher_id '
-         'WHERE l.period BETWEEN ? AND ? AND v.kind != ? GROUP BY l.account_code')
-    for r in conn.execute(q, (pf, pt, '结转损益')):
+    q = ('SELECT l.account_code, SUM(l.debit - l.credit) FROM ' + LINES_DATED +
+         ' WHERE v.date BETWEEN ? AND ? AND v.kind != ? GROUP BY l.account_code')
+    for r in conn.execute(q, (d1, d2, '结转损益')):
         out[r[0]] = out.get(r[0], 0) + r[1]
     return out
 
 
-def _is_values(conn, pf, pt, accts, items, include_opening):
-    sig = pl_signed(conn, pf, pt)
+def _is_values(conn, d1, d2, accts, items, include_opening):
+    sig = pl_signed(conn, d1, d2)
     if include_opening:
         for o in opening_rows(conn, accts):
             if not o['is_bs']:
@@ -377,14 +371,11 @@ def _is_values(conn, pf, pt, accts, items, include_opening):
     return vals
 
 
-def income_statement(conn, pf, pt=None):
-    """利润表：本期（pf~pt，可跨年）、本年累计（pt 所在年度 1 月至 pt）、上年同期（区间整体前移一年）。"""
-    if pt is None:
-        pt = pf
-    raw_pf = check_period(pf)
-    pf, pt = normalize_range(conn, pf, pt)
-    sp = start_period(conn)
-    sy = sp // 100
+def income_statement(conn, d1, d2=None):
+    """利润表：本期（起始日期至结束日期，可跨年）、本年累计（结束日期所在年度 1 月 1 日至结束日期）、
+    上年同期（日期整体前移一年）。"""
+    d1, d2, raw_d1 = date_range(conn, d1, d2 if d2 is not None else d1)
+    sd = start_date(conn)
     accts = account_map(conn)
     fmt, keymap = _fmt(conn)
     items = []
@@ -403,14 +394,13 @@ def income_statement(conn, pf, pt=None):
         kind = 'EXP' if key in IS_EXPENSE_KEYS else 'REV'
         by_key[key][2] = by_key[key][2] + [(kind, a['code'])]
 
-    year = pt // 100
-    # 账套年中启用时，启用前的本年累计数只有合计数：区间从启用月之前开始时才计入
-    month = _is_values(conn, pf, pt, accts, items, raw_pf < sp <= pt)
-    ytd = _is_values(conn, max(year * 100 + 1, sp), pt, accts, items, year == sy)
+    # 账套年中启用时，启用前的本年累计数只有合计数：区间从启用日之前开始时才计入
+    month = _is_values(conn, d1, d2, accts, items, raw_d1 < sd <= d2)
+    ytd = _is_values(conn, year_first(d2, sd), d2, accts, items, d2[:4] == sd[:4])
     prev = None
-    ppf, ppt = pf - 100, pt - 100
-    if ppf >= sp:  # 上年同期必须完整落在账套启用之后，才有可比数据
-        prev = _is_values(conn, ppf, ppt, accts, items, False)
+    pd1, pd2 = _minus_year(d1), _minus_year(d2)
+    if pd1 >= sd:  # 上年同期必须完整落在账套启用之后，才有可比数据
+        prev = _is_values(conn, pd1, pd2, accts, items, False)
     rows = []
     for it in items:
         key, name, terms, indent = it[0], it[1], it[2], it[3]
@@ -423,9 +413,16 @@ def income_statement(conn, pf, pt=None):
         rows.append({'key': key, 'name': name, 'indent': indent, 'total': isinstance(terms, str),
                      'memo': len(it) > 4, 'month': month[key], 'ytd': ytd[key],
                      'prev': prev[key] if prev else None, 'formula': formula})
-    return {'period': pt, 'from': pf, 'to': pt, 'label': range_label(pf, pt), 'single': pf == pt,
-            'prev_label': range_label(ppf, ppt), 'rows': rows, 'has_prev': prev is not None,
+    return {'from': d1, 'to': d2, 'label': date_label(d1, d2), 'year': int(d2[:4]),
+            'prev_label': date_label(pd1, pd2), 'rows': rows, 'has_prev': prev is not None,
             'form_no': fmt['is_no']}
+
+
+def _minus_year(d):
+    y, m, dd = int(d[:4]) - 1, d[5:7], d[8:]
+    if m == '02' and dd == '29':
+        dd = '28'
+    return '%04d-%s-%s' % (y, m, dd)
 
 
 # ---------------------------------------------------------------- 现金流量表
@@ -435,53 +432,48 @@ def _cash_codes(accts):
     return [c for c, a in accts.items() if a['is_cash'] and a['is_leaf']]
 
 
-def cash_balance_before(conn, p, accts):
-    """p 期期初（即 p-1 期末）的货币资金余额。p 不晚于启用期间时取启用时余额。"""
-    sp = start_period(conn)
+def cash_balance_before(conn, d, accts):
+    """日期 d 当天开始前的货币资金余额。d 不晚于启用日时取启用时余额。"""
     codes = set(_cash_codes(accts))
-    if p <= sp:
+    if d <= start_date(conn):
         return sum(o['at_start'] for o in opening_rows(conn, accts) if o['code'] in codes)
-    bal = leaf_end_balances(conn, prev_period(p))
+    bal = balances_before(conn, d, accts)
     return sum(v for (c, a), v in bal.items() if c in codes)
 
 
-def _cf_values(conn, pf, pt, accts):
+def _cf_values(conn, d1, d2, accts):
     codes = _cash_codes(accts)
     if not codes:
         return {}, 0
     marks = ','.join('?' * len(codes))
     flows = {}
-    for r in conn.execute('SELECT cf_item, SUM(debit - credit) FROM lines WHERE period BETWEEN ? AND ? '
-                          'AND account_code IN (%s) GROUP BY cf_item' % marks, [pf, pt] + codes):
+    for r in conn.execute('SELECT l.cf_item, SUM(l.debit - l.credit) FROM ' + LINES_DATED +
+                          ' WHERE v.date BETWEEN ? AND ? AND l.account_code IN (%s) GROUP BY l.cf_item' % marks,
+                          [d1, d2] + codes):
         flows[r[0] or ''] = r[1]
     return flows, flows.pop('', 0)
 
 
-def cash_flow(conn, pf, pt=None):
-    """现金流量表：本期（pf~pt，可跨年）与本年累计（pt 所在年度）。"""
-    if pt is None:
-        pt = pf
-    pf, pt = normalize_range(conn, pf, pt)
-    sp = start_period(conn)
-    p = pt
+def cash_flow(conn, d1, d2=None):
+    """现金流量表：本期（起始日期至结束日期，可跨年）与本年累计（结束日期所在年度）。"""
+    d1, d2, _raw = date_range(conn, d1, d2 if d2 is not None else d1)
     accts = account_map(conn)
     items = [dict(r) for r in conn.execute('SELECT * FROM cf_items ORDER BY sort')]
-    year = p // 100
-    y1 = max(year * 100 + 1, sp)
+    y1 = year_first(d2, start_date(conn))
 
-    def build(pf, pt):
-        flows, unassigned = _cf_values(conn, pf, pt, accts)
+    def build(a, b):
+        flows, unassigned = _cf_values(conn, a, b, accts)
         vals = {}
         for it in items:
             v = flows.get(it['code'], 0)
             vals[it['code']] = -v if it['flow'] == '流出' else v
         return vals, unassigned, flows.get('CF99', 0)
 
-    mv, m_un, m_int = build(pf, pt)
-    yv, y_un, y_int = build(y1, pt)
-    m_begin = cash_balance_before(conn, pf, accts)
+    mv, m_un, m_int = build(d1, d2)
+    yv, y_un, y_int = build(y1, d2)
+    m_begin = cash_balance_before(conn, d1, accts)
     y_begin = cash_balance_before(conn, y1, accts)
-    end_bal = cash_balance_before(conn, next_period(pt), accts)
+    end_bal = sum(v for (c, a), v in balances_through(conn, d2, accts).items() if c in set(_cash_codes(accts)))
 
     rows = []
     totals_m, totals_y = {}, {}
@@ -523,5 +515,5 @@ def cash_flow(conn, pf, pt=None):
         'unassigned_month': m_un, 'unassigned_ytd': y_un,
         'internal_month': m_int, 'internal_ytd': y_int,
     }
-    return {'period': pt, 'from': pf, 'to': pt, 'label': range_label(pf, pt), 'single': pf == pt,
+    return {'from': d1, 'to': d2, 'label': date_label(d1, d2), 'year': int(d2[:4]),
             'rows': rows, 'checks': checks, 'form_no': fmt['cf_no']}

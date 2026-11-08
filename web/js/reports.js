@@ -1,23 +1,24 @@
 /* 财务报表：资产负债表、利润表、现金流量表、单车盈利分析 */
 
 function reportRangePage(page, params, title, sub, defRange, hint) {
-  let pf = +params.from || 0, pt = +params.to || +params.period || 0;
-  if (!pf || !pt) [pf, pt] = defRange(pt || App.meta.current_period);
+  let pf = asDate(params.from), pt = asDate(params.to || params.period, true);
+  if (!pf || !pt) [pf, pt] = defRange();
   if (pf > pt) pf = pt;
   page.innerHTML = pageHead(title, sub) + `
     <div class="toolbar" id="flt">${rangeControls(pf, pt)}<button class="btn primary" id="search">生成报表</button>${printExportButtons()}</div>
     <p class="hint no-print" style="margin:-4px 0 12px">${hint}</p><div id="out"></div>`;
 }
-const curMonth = p => [p, p];
-const yearToDate = p => [Math.max(Math.floor(p / 100) * 100 + 1, App.meta.start_period), p];
+const curMonth = () => { const cur = App.meta.current_period; return [asDate(cur), lastDay(cur)]; };
+const yearToDate = () => defaultRange();
 
 /* ================= 资产负债表 ================= */
 App.pages.bs = async (page, params) => {
-  reportRangePage(page, params, '资产负债表', '结束月份月末的资产、负债和所有者权益，并与起始月份月初对比', yearToDate,
-    '“期末余额”取结束月份的月末数；对比列取起始月份的月初数——起始月份选 1 月时就是“年初余额”。可以跨年度，例如 2026年9月 至 2027年2月。');
+  reportRangePage(page, params, '资产负债表', '起始日期的期初余额和结束日期的期末余额', yearToDate,
+    '“期初余额”是起始日期当天开始前的余额（起始日期是 1 月 1 日时就是“年初余额”）；“期末余额”是结束日期当天结束时的余额。可以跨年度。');
   let data = null, pairs = [];
   const load = async () => {
     const [a, b] = readRange(page);
+    remember(page, { from: a, to: b });
     data = await api('/api/report/bs?' + qs({ from: a, to: b }));
     pairs = pairBalanceSheet(data.rows);
     const lineNo = bsLineNo(data.rows);
@@ -27,7 +28,7 @@ App.pages.bs = async (page, params) => {
       if (r.header) return `<td${cls} colspan="4"><b>${esc(r.name)}</b></td>`;
       const name = `<td${first ? '' : ' class="bs-right"'} title="${esc(r.formula)}"><span class="${r.total ? '' : r.memo ? 'ind2 muted' : 'ind'}">${r.total ? '<b>' + esc(r.name) + '</b>' : esc(r.name)}</span></td>`;
       const m = v => `<td class="n${r.total ? ' b' : ''}${r.memo ? ' muted' : ''}${v < 0 ? ' neg' : ''}">${fmt(v)}</td>`;
-      return `${name}<td class="c muted">${lineNo[r.key] || ''}</td>${m(r.end)}${m(r.begin)}`;
+      return `${name}<td class="c muted">${lineNo[r.key] || ''}</td>${m(r.begin)}${m(r.end)}`;
     };
     const c = data.checks;
     $('#out', page).innerHTML = `
@@ -36,8 +37,8 @@ App.pages.bs = async (page, params) => {
       ${reportTitle('资产负债表', data.label, data.form_no)}
       <div class="tbl-wrap"><table class="tbl bs-table">
         <colgroup><col class="bs-name"><col class="bs-no"><col><col><col class="bs-name"><col class="bs-no"><col><col></colgroup>
-        <thead><tr><th>资产</th><th class="c">行次</th><th class="n">期末余额</th><th class="n">${esc(data.begin_label)}</th>
-          <th class="bs-right">负债和所有者权益</th><th class="c">行次</th><th class="n">期末余额</th><th class="n">${esc(data.begin_label)}</th></tr></thead>
+        <thead><tr><th>资产</th><th class="c">行次</th><th class="n">${esc(data.begin_label)}</th><th class="n">${esc(data.end_label)}</th>
+          <th class="bs-right">负债和所有者权益</th><th class="c">行次</th><th class="n">${esc(data.begin_label)}</th><th class="n">${esc(data.end_label)}</th></tr></thead>
         <tbody>${pairs.map(([l, r]) => `<tr>${half(l, true)}${half(r, false)}</tr>`).join('')}</tbody>
       </table></div>
       <p class="hint no-print">本月尚未结转的损益已包含在“未分配利润”中，所以结转前后报表都能平衡。没有对应科目的项目显示为空。${data.rows.some(r => r.memo) ? '“固定资产”按“原价 − 累计折旧 − 减值准备 ± 固定资产清理”的净额填列（“无形资产”同理扣除累计摊销），下面灰色的“其中 / 减”行列出各部分金额，只供核对，不重复计入合计，也不编行次。' : ''}</p>`;
@@ -46,14 +47,14 @@ App.pages.bs = async (page, params) => {
   bindPE(page, () => {
     if (!data) return;
     const lineNo = bsLineNo(data.rows);
-    const cellsOf = r => !r ? ['', '', '', ''] : r.header ? [r.name, '', '', ''] : [r.memo ? '　　' + r.name : r.name, lineNo[r.key] || '', r.end, r.begin];
+    const cellsOf = r => !r ? ['', '', '', ''] : r.header ? [r.name, '', '', ''] : [r.memo ? '　　' + r.name : r.name, lineNo[r.key] || '', r.begin, r.end];
     const rows = pairs.map(([l, r]) => {
       const cells = cellsOf(l).concat(cellsOf(r));
       return (l && l.total) || (r && r.total) || (l && l.header) ? { cells, bold: true } : cells;
     });
-    exportXlsx('资产负债表', [{ name: '资产', width: 26 }, { name: '行次', type: 'number', width: 6 }, { name: '期末余额', type: 'money', width: 17 },
-      { name: data.begin_label, type: 'money', width: 17 }, { name: '负债和所有者权益（或股东权益）', width: 30 }, { name: '行次', type: 'number', width: 6 },
-      { name: '期末余额', type: 'money', width: 17 }, { name: data.begin_label, type: 'money', width: 17 }], rows, data.label + '　' + data.form_no);
+    exportXlsx('资产负债表', [{ name: '资产', width: 26 }, { name: '行次', type: 'number', width: 6 }, { name: data.begin_label, type: 'money', width: 20 },
+      { name: data.end_label, type: 'money', width: 20 }, { name: '负债和所有者权益（或股东权益）', width: 30 }, { name: '行次', type: 'number', width: 6 },
+      { name: data.begin_label, type: 'money', width: 20 }, { name: data.end_label, type: 'money', width: 20 }], rows, data.label + '　' + data.form_no);
   });
   await load();
 };
@@ -94,13 +95,14 @@ function pairBalanceSheet(rows) {
 /* ================= 利润表 ================= */
 App.pages.is = async (page, params) => {
   reportRangePage(page, params, '利润表', '所选期间的收入、成本、费用和利润', curMonth,
-    '“本期金额”是所选期间的合计，可以跨年度（例如 2026年9月 至 2027年2月）；“本年累计”是结束月份所在年度 1 月至结束月份；“上年同期”是所选期间整体提前一年。选 1 月至 12 月即为年度利润表。');
+    '“本期金额”是起止日期之间的合计，可以是几天、一个月或跨年度；“本年累计”是结束日期所在年度 1 月 1 日至结束日期；“上年同期”是起止日期整体提前一年。选 1 月 1 日至 12 月 31 日即为年度利润表。');
   let data = null;
   const load = async () => {
     const [a, b] = readRange(page);
+    remember(page, { from: a, to: b });
     data = await api('/api/report/is?' + qs({ from: a, to: b }));
-    const curLabel = data.single ? '本月金额' : '本期金额';
-    const ytdLabel = `本年累计金额（${Math.floor(data.to / 100)}年）`;
+    const curLabel = '本期金额';
+    const ytdLabel = `本年累计金额（${data.year}年）`;
     let n = 0;
     $('#out', page).innerHTML = `${reportTitle('利 润 表', data.label, data.form_no)}
       <div class="tbl-wrap"><table class="tbl"><thead><tr><th>项目</th><th class="c">行次</th><th class="n">${curLabel}</th><th class="n">${ytdLabel}</th>${data.has_prev ? `<th class="n">上年同期（${esc(data.prev_label)}）</th>` : ''}</tr></thead>
@@ -111,8 +113,8 @@ App.pages.is = async (page, params) => {
   $('#search', page).onclick = () => load().catch(e => toast(e.message, 'err'));
   bindPE(page, () => {
     if (!data) return;
-    const cols = [{ name: '项目', width: 40 }, { name: '行次', type: 'number', width: 6 }, { name: data.single ? '本月金额' : '本期金额', type: 'money', width: 18 },
-      { name: `本年累计金额（${Math.floor(data.to / 100)}年）`, type: 'money', width: 22 }];
+    const cols = [{ name: '项目', width: 40 }, { name: '行次', type: 'number', width: 6 }, { name: '本期金额', type: 'money', width: 18 },
+      { name: `本年累计金额（${data.year}年）`, type: 'money', width: 22 }];
     if (data.has_prev) cols.push({ name: `上年同期（${data.prev_label}）`, type: 'money', width: 26 });
     const rows = data.rows.map((r, i) => {
       const cells = ['　'.repeat(r.indent) + r.name, i + 1, r.month, r.ytd];
@@ -127,14 +129,15 @@ App.pages.is = async (page, params) => {
 /* ================= 现金流量表 ================= */
 App.pages.cf = async (page, params) => {
   reportRangePage(page, params, '现金流量表', '所选期间现金及现金等价物的流入和流出（直接法）', curMonth,
-    '“本期金额”是所选期间的合计，可以跨年度；“本年累计”是结束月份所在年度 1 月至结束月份。选 1 月至 12 月即为年度现金流量表。');
+    '“本期金额”是起止日期之间的合计，可以跨年度；“本年累计”是结束日期所在年度 1 月 1 日至结束日期。选 1 月 1 日至 12 月 31 日即为年度现金流量表。');
   let data = null;
   const load = async () => {
     const [a, b] = readRange(page);
+    remember(page, { from: a, to: b });
     data = await api('/api/report/cf?' + qs({ from: a, to: b }));
     const c = data.checks;
-    const curLabel = data.single ? '本月金额' : '本期金额';
-    const ytdLabel = `本年累计金额（${Math.floor(data.to / 100)}年）`;
+    const curLabel = '本期金额';
+    const ytdLabel = `本年累计金额（${data.year}年）`;
     const notes = [];
     if (c.unassigned_month || c.unassigned_ytd) notes.push(`有现金类分录没有指定现金流量项目：本期 ${fmtN(c.unassigned_month)}，本年 ${fmtN(c.unassigned_ytd)}。可在凭证查询中按现金科目筛选后补充。`);
     if (c.internal_month || c.internal_ytd) notes.push(`“现金内部划转”项目借贷不相抵：本期 ${fmtN(c.internal_month)}，本年 ${fmtN(c.internal_ytd)}。`);
@@ -154,8 +157,8 @@ App.pages.cf = async (page, params) => {
     if (!data) return;
     const rows = data.rows.map(r => r.header ? { cells: [r.name], bold: true }
       : (r.total ? { cells: [r.name, r.month, r.ytd], bold: true } : ['　'.repeat(r.indent || 0) + r.name, r.month, r.ytd]));
-    exportXlsx('现金流量表', [{ name: '项目', width: 50 }, { name: data.single ? '本月金额' : '本期金额', type: 'money', width: 18 },
-      { name: `本年累计金额（${Math.floor(data.to / 100)}年）`, type: 'money', width: 22 }], rows, data.label);
+    exportXlsx('现金流量表', [{ name: '项目', width: 50 }, { name: '本期金额', type: 'money', width: 18 },
+      { name: `本年累计金额（${data.year}年）`, type: 'money', width: 22 }], rows, data.label);
   });
   await load();
 };
@@ -167,13 +170,14 @@ App.pages.vprofit = async (page, params) => {
     return;
   }
   let [dpf, dpt] = defaultRange();
-  if (+params.from && +params.to && +params.from <= +params.to) [dpf, dpt] = [+params.from, +params.to];
+  if (asDate(params.from) && asDate(params.to, true)) [dpf, dpt] = [asDate(params.from), asDate(params.to, true)];
   page.innerHTML = pageHead('单车盈利分析', '按车辆汇总租金收入、折旧、保险、维修等直接成本') + `
     <div class="toolbar" id="flt">${rangeControls(dpf, dpt)}<input type="text" name="q" placeholder="车牌号筛选" style="width:130px">
       <button class="btn primary" id="search">查询</button>${printExportButtons()}</div><div id="out"></div>`;
   let data = null;
   const load = async () => {
     const [a, b] = readRange(page);
+    remember(page, { from: a, to: b });
     data = await api('/api/vehicle/profit?' + qs({ from: a, to: b }));
     const q = $('[name=q]', page).value.trim().toUpperCase();
     const rows = data.rows.filter(r => !q || r.plate.includes(q));
@@ -200,7 +204,7 @@ App.pages.vprofit = async (page, params) => {
     const t = data.total;
     rows.push({ cells: ['合计', '', '', t.revenue, t.depr, t.insurance, t.repair, t.other, t.profit], bold: true });
     exportXlsx('单车盈利分析', [{ name: '车牌号', width: 22 }, { name: '车型' }, { name: '状态' }, M('收入'), M('折旧'), M('保险'), M('维修保养'), M('其他成本'), M('毛利')],
-      rows, `${plabel(data.from)} 至 ${plabel(data.to)}`);
+      rows, data.label);
   });
   await load();
 };

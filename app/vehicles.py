@@ -128,14 +128,24 @@ def delete_vehicle(conn, vid):
     log(conn, '删除车辆', v['plate'])
 
 
-def purchase_draft(conn, vid, tax_rate=13):
+def purchase_draft(conn, vid, tax_rate=13, mode=''):
+    """购车凭证草稿。mode='deduct'：取得专票抵扣进项税（借 固定资产 原值、进项税额，贷 应付）；
+    mode='inclusive'：不抵扣，含税价全部计入原值（借 固定资产，贷 应付）。不传时按账套计税方式：简易计税默认含税入原值。"""
     v = conn.execute('SELECT * FROM vehicles WHERE id = ?', (vid,)).fetchone()
     if not v:
         raise AppError('车辆不存在')
-    tax = round(v['original'] * tax_rate / 100)
+    if mode not in ('deduct', 'inclusive'):
+        mode = 'inclusive' if company_profile(conn)['vat_mode'] == 'simple' else 'deduct'
     s = '购入车辆 %s %s' % (v['plate'], v['model'])
     fa_code = acct_key(conn, 'vehicle_fa')
-    notes = ['已按 %g%% 进项税生成购车凭证草稿，请选择供应商（或把贷方改为银行存款）后保存。' % tax_rate]
+    if mode == 'deduct':
+        tax = round(v['original'] * tax_rate / 100)
+        notes = ['已按 %g%% 进项税生成购车凭证草稿（车辆台账里的原值是不含税价），请选择供应商（或把贷方改为银行存款）后保存。'
+                 % tax_rate]
+    else:
+        tax = 0
+        notes = ['已按“含税价全部计入原值、进项税不抵扣”生成购车凭证草稿（车辆台账里的原值应填含税价），'
+                 '请选择供应商（或把贷方改为银行存款）后保存。']
     p = period_of_date(v['purchase_date'])
     if p < start_period(conn):
         notes.append('注意：这辆车的购置日期早于账套启用期间，属于启用前已有的车辆，'
@@ -145,11 +155,11 @@ def purchase_draft(conn, vid, tax_rate=13):
     if booked[0]:
         notes.append('注意：账上已经有这辆车的固定资产记录（%.2f 元），请先到“凭证查询”确认是否已录过购车凭证，避免重复入账。'
                      % (booked[1] / 100))
-    return {'date': v['purchase_date'], 'note': ''.join(notes), 'lines': [
-        {'summary': s, 'account': acct_key(conn, 'vehicle_fa'), 'aux_id': v['aux_id'], 'debit': v['original'], 'credit': 0},
-        {'summary': s, 'account': acct_key(conn, 'vat_in'), 'aux_id': 0, 'debit': tax, 'credit': 0},
-        {'summary': s, 'account': acct_key(conn, 'ap'), 'aux_id': 0, 'debit': 0, 'credit': v['original'] + tax},
-    ]}
+    lines = [{'summary': s, 'account': fa_code, 'aux_id': v['aux_id'], 'debit': v['original'], 'credit': 0}]
+    if tax:
+        lines.append({'summary': s, 'account': acct_key(conn, 'vat_in'), 'aux_id': 0, 'debit': tax, 'credit': 0})
+    lines.append({'summary': s, 'account': acct_key(conn, 'ap'), 'aux_id': 0, 'debit': 0, 'credit': v['original'] + tax})
+    return {'date': v['purchase_date'], 'note': ''.join(notes), 'mode': mode, 'lines': lines}
 
 
 def dispose(conn, data):
@@ -266,9 +276,10 @@ def reconcile(conn, p=None):
             'card_accum': total_accum, 'book_accum': book_accum, 'mismatches': rows}
 
 
-def vehicle_profit(conn, pf, pt):
-    """单车盈利：按车辆汇总收入、折旧和其他直接成本（不含结转损益凭证）。"""
-    pf, pt = int(pf), int(pt)
+def vehicle_profit(conn, d1, d2):
+    """单车盈利：按车辆汇总 [d1, d2] 日期内的收入、折旧和其他直接成本（不含结转损益凭证）。"""
+    from .ledger import date_range, date_label
+    d1, d2, _raw = date_range(conn, d1, d2)
     rows = {}
     names = {r['aux_id']: dict(r) for r in conn.execute('SELECT * FROM vehicles')}
 
@@ -287,9 +298,9 @@ def vehicle_profit(conn, pf, pt):
     pres = rev_pre + cost_pre
     if pres:
         q = ('SELECT l.account_code, l.aux_id, SUM(l.credit - l.debit) AS amt FROM lines l '
-             'JOIN vouchers v ON v.id = l.voucher_id WHERE v.kind != ? AND l.period BETWEEN ? AND ? AND ('
+             'JOIN vouchers v ON v.id = l.voucher_id WHERE v.kind != ? AND v.date BETWEEN ? AND ? AND ('
              + ' OR '.join(['l.account_code LIKE ?'] * len(pres)) + ') GROUP BY l.account_code, l.aux_id')
-        for r in conn.execute(q, ['结转损益', pf, pt] + [p + '%' for p in pres]):
+        for r in conn.execute(q, ['结转损益', d1, d2] + [p + '%' for p in pres]):
             code, aux, amt = r['account_code'], r['aux_id'], r['amt']
             if code.startswith(depr_code):
                 continue  # 折旧从折旧明细取，按车辆分摊
@@ -304,7 +315,8 @@ def vehicle_profit(conn, pf, pt):
             else:
                 d['other'] -= amt
     for r in conn.execute('SELECT v.aux_id, SUM(d.amount) FROM depr_records d JOIN vehicles v ON v.id = d.vehicle_id '
-                          'WHERE d.period BETWEEN ? AND ? GROUP BY v.aux_id', (pf, pt)):
+                          'JOIN vouchers vv ON vv.id = d.voucher_id '
+                          'WHERE vv.date BETWEEN ? AND ? GROUP BY v.aux_id', (d1, d2)):
         get(r[0])['depr'] += r[1]
     out = []
     for d in rows.values():
@@ -314,4 +326,4 @@ def vehicle_profit(conn, pf, pt):
             out.append(d)
     out.sort(key=lambda d: (d['aux_id'] == 0, -d['profit']))
     total = {k: sum(d[k] for d in out) for k in ('revenue', 'depr', 'insurance', 'repair', 'other', 'cost', 'profit')}
-    return {'from': pf, 'to': pt, 'rows': out, 'total': total}
+    return {'from': d1, 'to': d2, 'label': date_label(d1, d2), 'rows': out, 'total': total}

@@ -1,9 +1,12 @@
 """
 明簿 —— 启动入口。
-免安装版：双击“明簿.exe”（Windows）或“明簿.app”（Mac）。旧版安装的启动器名字是“财务记账软件”，同样可以用。
+Windows：双击软件文件夹里的“明簿.exe”（老用户文件夹里叫“财务记账软件.exe”，同样可以用），
+它会找到 versions/current.txt 里写的版本，用自带的 Python 运行那个版本里的 start.py。
+Mac（测试用）：双击“明簿.app”。
 开发时也可以在命令行运行：python3 start.py
-  --browser     不用独立窗口，用浏览器打开（也可以设置环境变量 RENTAL_BROWSER=1）
-  --no-browser  只启动后台服务，不打开界面
+  --no-browser  只启动后台服务，不打开界面（关掉页面后也不会自动退出）
+界面用浏览器的“应用模式”打开（Edge / Chrome 的 --app 窗口，看起来像独立软件）；都没有时用默认浏览器。
+所有界面窗口都关掉后，后台程序自动退出。
 """
 import os
 import sys
@@ -16,37 +19,65 @@ def _quiet_output():
     """用 pythonw 启动（没有黑色窗口）时，把输出写进日志文件，方便排查问题。"""
     if sys.stdout is None or sys.stderr is None or '--log' in sys.argv:
         try:
-            data_dir = os.environ.get('RENTAL_DATA_DIR') or os.path.join(HERE, 'data')
-            os.makedirs(data_dir, exist_ok=True)
-            log = open(os.path.join(data_dir, '运行日志.txt'), 'a', encoding='utf-8', buffering=1)
+            from app import paths
+            os.makedirs(paths.DATA_DIR, exist_ok=True)
+            log_file = os.path.join(paths.DATA_DIR, '运行日志.txt')
+            # 日志太大时只保留后面一部分
+            try:
+                if os.path.getsize(log_file) > 2 * 1024 * 1024:
+                    with open(log_file, 'rb') as f:
+                        f.seek(-512 * 1024, 2)
+                        tail = f.read()
+                    with open(log_file, 'wb') as f:
+                        f.write(tail)
+            except OSError:
+                pass
+            log = open(log_file, 'a', encoding='utf-8', buffering=1)
             sys.stdout = sys.stderr = log
         except Exception:
             pass
 
 
 def _desktop_shortcut():
-    """Windows：第一次运行时在桌面创建快捷方式（只创建一次）。"""
+    """Windows：在桌面创建“明簿”快捷方式，指向软件文件夹里的启动程序。
+    每个软件文件夹只创建一次；软件文件夹换了位置（例如拷到别的电脑）会重新创建。"""
     if os.name != 'nt' or '--no-shortcut' in sys.argv:
         return
-    # 软件改名为“明簿”；在线更新不替换启动器，老用户文件夹里仍是“财务记账软件.exe”
-    exe = os.path.join(HERE, '明簿.exe')
-    if not os.path.exists(exe):
-        exe = os.path.join(HERE, '财务记账软件.exe')
-    data_dir = os.environ.get('RENTAL_DATA_DIR') or os.path.join(HERE, 'data')
-    flag = os.path.join(data_dir, '.shortcut_created')
-    if not os.path.exists(exe) or os.path.exists(flag):
+    from app import paths
+    exe = paths.launcher()
+    if not exe or not os.path.exists(exe):
         return
+    flag = os.path.join(paths.DATA_DIR, '.shortcut_created')
+    try:
+        with open(flag, encoding='utf-8') as f:
+            if os.path.normcase(f.read().strip()) == os.path.normcase(exe):
+                return
+    except OSError:
+        pass
     try:
         import subprocess
         ps = ("$d=[Environment]::GetFolderPath('Desktop');"
               "$s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d '明簿.lnk'));"
-              "$s.TargetPath='%s';$s.WorkingDirectory='%s';$s.IconLocation='%s,0';$s.Save()") % (exe, HERE, exe)
+              "$s.TargetPath='%s';$s.WorkingDirectory='%s';$s.IconLocation='%s,0';$s.Save()") % (
+            exe.replace("'", "''"), paths.HOME.replace("'", "''"), exe.replace("'", "''"))
         subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps],
                        creationflags=0x08000000, timeout=20)  # CREATE_NO_WINDOW
-        os.makedirs(data_dir, exist_ok=True)
-        open(flag, 'w').close()
+        os.makedirs(paths.DATA_DIR, exist_ok=True)
+        with open(flag, 'w', encoding='utf-8') as f:
+            f.write(exe)
     except Exception as e:
         print('创建桌面快捷方式失败：', e)
+
+
+def _cleanup():
+    """从老结构更新过来后，把老结构留下的程序文件移到 backups/旧版本程序 里（账套数据不动）。"""
+    try:
+        from app import updater
+        moved = updater.cleanup_legacy()
+        if moved:
+            print('已把老版本留下的程序文件移到 backups/旧版本程序：', '、'.join(moved))
+    except Exception as e:
+        print('整理老版本文件失败：', e)
 
 
 def _alert(msg):
@@ -66,28 +97,10 @@ def _alert(msg):
 if __name__ == '__main__':
     if sys.version_info < (3, 8):
         sys.exit('需要 Python 3.8 或更高版本')
-    if '--window' in sys.argv:
-        # 独立窗口子进程（由主进程启动，见 app/desktop.py）。标准输出留给和主进程通信，普通输出写到 stderr / 日志
-        if sys.stderr is not None:
-            sys.stdout = sys.stderr
-        _quiet_output()
-        try:
-            from app.desktop import run_window
-            sys.exit(run_window(sys.argv[sys.argv.index('--window') + 1]))
-        except SystemExit:
-            raise
-        except BaseException as e:
-            import traceback
-            traceback.print_exc()
-            try:
-                sys.__stdout__.write('unavailable %s\n' % e)
-                sys.__stdout__.flush()
-            except Exception:
-                pass
-            sys.exit(3)
     _quiet_output()
-    _desktop_shortcut()
     try:
+        _desktop_shortcut()
+        _cleanup()
         from app.server import run
         port = int(os.environ.get('PORT', '8765'))
         run(port=port, open_browser='--no-browser' not in sys.argv)

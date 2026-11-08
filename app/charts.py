@@ -346,10 +346,11 @@ INDUSTRIES = {}
 
 
 def industry(code, name, desc, subs, templates, features=(), aux_types=(), wage_cost=(), aux_overrides=None,
-             vehicle_label='车辆'):
+             vehicle_label='车辆', vat_mode='general'):
+    """vat_mode：general 一般计税；simple 简易计税（进项不抵扣）；mixed 两种都有。影响购车凭证草稿的默认做法。"""
     INDUSTRIES[code] = {'code': code, 'name': name, 'desc': desc, 'subs': subs, 'templates': templates,
                         'features': list(features), 'aux_types': list(aux_types), 'wage_cost': list(wage_cost),
-                        'aux_overrides': aux_overrides or {}, 'vehicle_label': vehicle_label}
+                        'aux_overrides': aux_overrides or {}, 'vehicle_label': vehicle_label, 'vat_mode': vat_mode}
 
 
 # 1. 汽车租赁
@@ -383,21 +384,25 @@ industry(
      ('收到保险理赔款', [('收到保险公司理赔款', 'bank', '借', 'T'), ('收到保险公司理赔款', 'ins_claim', '贷', 'T')])],
     features=['vehicles'], wage_cost=['cost_wage'], aux_overrides=VEHICLE_AUX_OVERRIDES, vehicle_label='租赁车辆')
 
-# 2. 旅客运输
+# 2. 旅客运输（一般计税）——行业代码 passenger 不变，老账套保存的是自己的行业名称，不受改名影响
+PASSENGER_COST = [S('01', '车辆折旧', key='depr_exp'), S('02', '燃料费', '车辆', 0, 'veh_fuel'),
+                  S('03', '路桥费', '车辆', 0, 'toll'), S('04', '驾乘人员薪酬', key='cost_wage', cf=WAGE_CF),
+                  S('05', '车辆保险费', '车辆', 0, 'veh_ins'), S('06', '维修保养费', '车辆', 0, 'veh_repair'),
+                  S('07', '站务费及车站服务费', key='station_fee'), S('08', '承运人责任险'),
+                  S('09', '年检及GPS费', '车辆', 0, 'veh_check'), S('99', '其他')]
+PASSENGER_OTHER_AP = [S('01', '代收票款', key='ticket_collect'), S('02', '押金及保证金', '客户', 0, 'deposit_recv'),
+                      S('99', '其他')]
+
 industry(
-    'passenger', '旅客运输', '班线客运、旅游包车、定制客运。含车辆台账、自动折旧、单车盈利，增加“线路”辅助核算。客运收入按 9% 预置。',
+    'passenger', '旅客运输（一般计税）',
+    '班线客运、旅游包车、定制客运，按一般纳税人计税。含车辆台账、自动折旧、单车盈利，增加“线路”辅助核算。客运收入按 9% 预置。',
     dict(vehicle_fa('营运车辆'), **{
         'main_rev': [S('01', '客票收入', '线路', 0, 'ticket'), S('02', '包车收入', '车辆', 0, 'charter'),
                      S('03', '行包托运收入', key='luggage'), S('04', '定制客运收入', '线路', 0, 'custom_bus')],
         'other_rev': [S('01', '车身广告收入', key='ad_income'), S('02', '车辆出租收入'), S('99', '其他')],
-        'main_cost': [S('01', '车辆折旧', key='depr_exp'), S('02', '燃料费', '车辆', 0, 'veh_fuel'),
-                      S('03', '路桥费', '车辆', 0, 'toll'), S('04', '驾乘人员薪酬', key='cost_wage', cf=WAGE_CF),
-                      S('05', '车辆保险费', '车辆', 0, 'veh_ins'), S('06', '维修保养费', '车辆', 0, 'veh_repair'),
-                      S('07', '站务费及车站服务费', key='station_fee'), S('08', '承运人责任险'),
-                      S('09', '年检及GPS费', '车辆', 0, 'veh_check'), S('99', '其他')],
+        'main_cost': PASSENGER_COST,
         'materials': [S('01', '燃料'), S('02', '轮胎'), S('03', '配件及耗材')],
-        'other_ap': [S('01', '代收票款', key='ticket_collect'), S('02', '押金及保证金', '客户', 0, 'deposit_recv'),
-                     S('99', '其他')],
+        'other_ap': PASSENGER_OTHER_AP,
     }),
     [sale('收到客票收入（含税9%）', '收到客票收入', 'ticket', 9),
      sale('收到包车款（含税9%）', '收到包车款', 'charter', 9),
@@ -409,6 +414,79 @@ industry(
      buy('购入车辆（13%专票，挂应付）', '购入车辆', 'vehicle_fa', 13, 'ap')],
     features=['vehicles'], aux_types=['线路'], wage_cost=['cost_wage'], aux_overrides=VEHICLE_AUX_OVERRIDES,
     vehicle_label='营运车辆')
+
+
+def sale_simple(name, summary, rev_key, rate=3, cash_key='bank'):
+    """简易计税收款模板：借 现金类，贷 收入（不含税）、应交税费—简易计税（按征收率）。"""
+    return (name, [(summary, cash_key, '借', 'T'), (summary, rev_key, '贷', 'NET:%s' % rate),
+                   (summary, 'vat_simple', '贷', 'TAX:%s' % rate)])
+
+
+def pay_inclusive(name, summary, cost_key, credit_key='bank'):
+    """简易计税：进项税不能抵扣，费用按含税金额全额记入成本。"""
+    return (name, [(summary, cost_key, '借', 'T'), (summary, credit_key, '贷', 'T')])
+
+
+# 2b. 公路旅客运输（简易计税）：收入按 3% 征收率，进项税不抵扣，费用含税计入成本
+industry(
+    'passenger_simple', '公路旅客运输（简易计税）',
+    '公共交通运输服务选择简易计税：客运收入按 3% 征收率记入“应交税费—简易计税”，进项税额不抵扣，'
+    '燃料、维修、保险等费用和购车款都按含税金额计入成本或原值。含车辆台账、自动折旧、单车盈利和“线路”辅助核算。',
+    dict(vehicle_fa('营运车辆'), **{
+        'main_rev': [S('01', '客票收入', '线路', 0, 'ticket'), S('02', '包车收入', '车辆', 0, 'charter'),
+                     S('03', '行包托运收入', key='luggage'), S('04', '定制客运收入', '线路', 0, 'custom_bus')],
+        'other_rev': [S('01', '车身广告收入', key='ad_income'), S('02', '车辆出租收入'), S('99', '其他')],
+        'main_cost': PASSENGER_COST,
+        'materials': [S('01', '燃料'), S('02', '轮胎'), S('03', '配件及耗材')],
+        'other_ap': PASSENGER_OTHER_AP,
+    }),
+    [sale_simple('收到客票收入（简易计税3%）', '收到客票收入', 'ticket'),
+     sale_simple('收到包车款（简易计税3%）', '收到包车款', 'charter'),
+     sale_simple('收到客票收入（微信，简易计税3%）', '收到客票收入', 'ticket', 3, 'wechat'),
+     pay_inclusive('支付燃料费（含税计入成本）', '支付燃料费', 'veh_fuel'),
+     pay_inclusive('支付路桥费', '支付路桥费', 'toll'),
+     pay_inclusive('支付维修保养费（含税计入成本）', '支付车辆维修保养费', 'veh_repair'),
+     pay_inclusive('支付车辆保险费（含税计入成本）', '支付车辆保险费', 'veh_ins'),
+     pay_inclusive('支付车站服务费（含税计入成本）', '支付车站服务费', 'station_fee'),
+     pay_inclusive('购入车辆（含税计入原值，挂应付）', '购入车辆', 'vehicle_fa', 'ap'),
+     ('缴纳上月简易计税增值税', [('缴纳增值税（简易计税）', 'vat_simple', '借', 'T'),
+                          ('缴纳增值税（简易计税）', 'bank', '贷', 'T')])],
+    features=['vehicles'], aux_types=['线路'], wage_cost=['cost_wage'], aux_overrides=VEHICLE_AUX_OVERRIDES,
+    vehicle_label='营运车辆', vat_mode='simple')
+
+# 2c. 公路旅客运输（简易+一般计税）：同一家公司两种业务都有，两套模板都预置（新建账套的默认行业）
+industry(
+    'passenger_mixed', '公路旅客运输（简易+一般计税）',
+    '班线客运等公共交通运输服务按简易计税（3% 征收率），包车、广告等其他业务按一般计税（9%/6%），两套凭证模板都有。'
+    '收入科目按计税方式分开设明细，方便申报时取数。用于一般计税业务的进项税可以抵扣；'
+    '专门用于简易计税项目的进项税不能抵扣，按含税金额计入成本。含车辆台账、自动折旧、单车盈利和“线路”辅助核算。',
+    dict(vehicle_fa('营运车辆'), **{
+        'main_rev': [S('01', '客票收入（简易计税）', '线路', 0, 'ticket'),
+                     S('02', '定制客运收入（简易计税）', '线路', 0, 'custom_bus'),
+                     S('03', '包车收入（一般计税）', '车辆', 0, 'charter'),
+                     S('04', '行包托运收入（一般计税）', key='luggage')],
+        'other_rev': [S('01', '车身广告收入（一般计税）', key='ad_income'), S('02', '车辆出租收入'), S('99', '其他')],
+        'main_cost': PASSENGER_COST,
+        'materials': [S('01', '燃料'), S('02', '轮胎'), S('03', '配件及耗材')],
+        'other_ap': PASSENGER_OTHER_AP,
+    }),
+    [sale_simple('收到客票收入（简易计税3%）', '收到客票收入', 'ticket'),
+     sale_simple('收到客票收入（微信，简易计税3%）', '收到客票收入', 'ticket', 3, 'wechat'),
+     sale_simple('收到定制客运收入（简易计税3%）', '收到定制客运收入', 'custom_bus'),
+     sale('收到包车款（一般计税，含税9%）', '收到包车款', 'charter', 9),
+     sale('收到车身广告费（一般计税，含税6%）', '收到车身广告费', 'ad_income', 6),
+     buy('支付燃料费（13%专票，抵扣）', '支付燃料费', 'veh_fuel', 13),
+     pay_inclusive('支付燃料费（简易计税项目，含税计入成本）', '支付燃料费', 'veh_fuel'),
+     ('支付路桥费', [('支付路桥费', 'toll', '借', 'T'), ('支付路桥费', 'bank', '贷', 'T')]),
+     buy('支付维修保养费（13%专票，抵扣）', '支付车辆维修保养费', 'veh_repair', 13),
+     pay_inclusive('支付维修保养费（简易计税项目，含税计入成本）', '支付车辆维修保养费', 'veh_repair'),
+     buy('支付车辆保险费（6%专票，抵扣）', '支付车辆保险费', 'veh_ins', 6),
+     buy('购入车辆（13%专票抵扣，挂应付）', '购入车辆', 'vehicle_fa', 13, 'ap'),
+     pay_inclusive('购入车辆（含税计入原值，挂应付）', '购入车辆', 'vehicle_fa', 'ap'),
+     ('缴纳上月简易计税增值税', [('缴纳增值税（简易计税）', 'vat_simple', '借', 'T'),
+                          ('缴纳增值税（简易计税）', 'bank', '贷', 'T')])],
+    features=['vehicles'], aux_types=['线路'], wage_cost=['cost_wage'], aux_overrides=VEHICLE_AUX_OVERRIDES,
+    vehicle_label='营运车辆', vat_mode='mixed')
 
 # 3. 道路货物运输
 industry(
@@ -535,6 +613,41 @@ industry(
      buy('支付外包服务费（6%专票）', '支付外包服务费', 'outsourced', 6)],
     aux_types=['项目'], wage_cost=['cost_wage'])
 
+# 8b. 汽车修理修配（一般纳税人 13%）——科目和模板与 v1.6.5 建立的账套一致
+industry(
+    'auto_repair', '汽车修理修配',
+    '汽车维修、保养、钣喷。按一般纳税人 13% 计税；有配件库存（采购入库、维修领用）、维修收入、保险公司直赔挂账等模板。'
+    '维修收入和配件成本按“维修车辆”（车牌号）辅助核算，可以在明细账、辅助核算余额表里按车牌号查每辆车的维修情况。',
+    {
+        'materials': [S('01', '汽车配件', key='parts'), S('02', '油品及辅料', key='oils'), S('03', '轮胎', key='tyres')],
+        'fa': [S('01', '房屋及建筑物'), S('02', '维修设备', key='fa_repair_equip'), S('03', '运输设备', key='fa_transport'),
+               S('04', '办公及电子设备', key='fa_office')],
+        'accum_depr': [S('01', '房屋及建筑物'), S('02', '维修设备'), S('03', '运输设备'),
+                       S('04', '办公及电子设备', key='depr_office')],
+        'main_rev': [S('01', '维修工时收入', '维修车辆', 0, 'repair_labor'), S('02', '配件销售收入', '维修车辆', 0, 'parts_rev'),
+                     S('03', '保养服务收入', '维修车辆', 0, 'maint_rev'), S('04', '钣金喷漆收入', '维修车辆', 0, 'paint_rev')],
+        'other_rev': [S('01', '洗车美容收入', key='wash_rev'), S('02', '废旧件销售收入', key='scrap_rev'), S('99', '其他')],
+        'main_cost': [S('01', '配件成本', '维修车辆', 0, 'parts_cost'), S('02', '油品及辅料', key='supplies_cost'),
+                      S('03', '维修人员薪酬', key='cost_wage', cf=WAGE_CF), S('04', '外协维修费', key='repair_outsourced'),
+                      S('05', '设备折旧', key='depr_exp'), S('06', '工具及低值易耗品'), S('99', '其他')],
+        'other_cost': [S('01', '废旧件销售成本'), S('99', '其他')],
+    },
+    [sale('收到维修工时费（含税13%）', '收到维修工时费', 'repair_labor', 13),
+     sale('收到维修工时费（微信，含税13%）', '收到维修工时费', 'repair_labor', 13, 'wechat'),
+     sale('收到配件销售款（含税13%）', '收到配件销售款', 'parts_rev', 13),
+     ('维修结算（工时+配件，挂应收）', [('维修结算', 'ar', '借', 'T'), ('维修结算', 'repair_labor', '贷', ''),
+                             ('维修结算', 'parts_rev', '贷', ''), ('维修结算', 'vat_out', '贷', 'TAX:13')]),
+     ('保险公司直赔维修款（挂应收）', [('保险公司直赔维修款', 'ar', '借', 'T'), ('保险公司直赔维修款', 'repair_labor', '贷', 'NET:13'),
+                            ('保险公司直赔维修款', 'vat_out', '贷', 'TAX:13')]),
+     ('收到保险公司赔款', [('收到保险公司赔款', 'bank', '借', 'T'), ('收到保险公司赔款', 'ar', '贷', 'T')]),
+     buy('采购配件（13%专票，挂应付）', '采购配件', 'parts', 13, 'ap'),
+     buy('采购配件（13%专票，银行付款）', '采购配件', 'parts', 13),
+     buy('采购油品辅料（13%专票）', '采购油品辅料', 'oils', 13),
+     ('领用配件结转成本', [('领用配件', 'parts_cost', '借', 'T'), ('领用配件', 'parts', '贷', 'T')]),
+     ('领用油品辅料', [('领用油品辅料', 'supplies_cost', '借', 'T'), ('领用油品辅料', 'oils', '贷', 'T')]),
+     buy('支付外协维修费（13%专票）', '支付外协维修费', 'repair_outsourced', 13)],
+    aux_types=['维修车辆'], wage_cost=['cost_wage'], vat_mode='general')
+
 # 9. 通用
 industry(
     'general', '通用（其他行业）', '只预置准则规定的常用科目和通用凭证模板，可以按需要自行增加明细科目。',
@@ -543,14 +656,18 @@ industry(
      sale('收到服务费（含税6%）', '收到服务费', 'rev_main', 6)],
     wage_cost=[])
 
-INDUSTRY_ORDER = ['car_rental', 'passenger', 'freight', 'elderly_care', 'trade', 'catering', 'property', 'service',
-                  'general']
+INDUSTRY_ORDER = ['passenger_mixed', 'passenger_simple', 'passenger', 'car_rental', 'freight', 'auto_repair',
+                  'elderly_care', 'trade', 'catering', 'property', 'service', 'general']
+
+# 新建账套时默认选中的行业
+DEFAULT_INDUSTRY = 'passenger_mixed'
 
 
 def options():
     return {
         'standards': [{'code': k, 'name': v} for k, v in STANDARDS.items()],
         'industries': [{'code': c, 'name': INDUSTRIES[c]['name'], 'desc': INDUSTRIES[c]['desc']} for c in INDUSTRY_ORDER],
+        'default_industry': DEFAULT_INDUSTRY,
     }
 
 
@@ -655,6 +772,7 @@ def build(standard, industry_code):
         'cf_suggest': cf_suggest,
         'features': ind['features'],
         'vehicle_label': ind['vehicle_label'],
+        'vat_mode': ind['vat_mode'],
     }
 
 

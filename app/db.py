@@ -12,11 +12,11 @@ import re
 import shutil
 import sqlite3
 
-from . import presets, charts
+from . import presets, charts, paths
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.environ.get('RENTAL_DATA_DIR') or os.path.join(ROOT, 'data')
-BACKUP_DIR = os.environ.get('RENTAL_BACKUP_DIR') or os.path.join(ROOT, 'backups')
+ROOT = paths.HOME          # 软件文件夹（见 paths.py）
+DATA_DIR = paths.DATA_DIR
+BACKUP_DIR = paths.BACKUP_DIR
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
@@ -246,10 +246,10 @@ def _next_company_id():
 
 
 COMPANY_META_KEYS = ('standard', 'industry', 'industry_name', 'keymap', 'aux_types', 'features', 'cf_suggest',
-                     'vehicle_label')
+                     'vehicle_label', 'vat_mode')
 
 
-def create_company(name, start_year, start_month, copy_from='', standard='enterprise', industry='car_rental'):
+def create_company(name, start_year, start_month, copy_from='', standard='enterprise', industry=None):
     name = (name or '').strip()
     if not name:
         raise AppError('请填写公司名称')
@@ -260,7 +260,7 @@ def create_company(name, start_year, start_month, copy_from='', standard='enterp
         raise AppError('启用年月不正确')
     if not copy_from:
         try:
-            chart = charts.build(standard or 'enterprise', industry or 'general')
+            chart = charts.build(standard or 'enterprise', industry or charts.DEFAULT_INDUSTRY)
         except ValueError as e:
             raise AppError(str(e))
     cid = _next_company_id()
@@ -302,6 +302,7 @@ def create_company(name, start_year, start_month, copy_from='', standard='enterp
             set_meta(conn, 'features', json.dumps(chart['features']))
             set_meta(conn, 'cf_suggest', json.dumps(chart['cf_suggest']))
             set_meta(conn, 'vehicle_label', chart['vehicle_label'])
+            set_meta(conn, 'vat_mode', chart['vat_mode'])
             for code, cname, section, flow, sort in chart['cf_items']:
                 conn.execute('INSERT INTO cf_items VALUES (?,?,?,?,?)', (code, cname, section, flow, sort))
             for a in chart['accounts']:
@@ -340,6 +341,8 @@ def company_profile(conn):
         'features': js('features', []),
         'cf_suggest': js('cf_suggest', {'': ['CF03', 'CF07']}),
         'vehicle_label': meta.get('vehicle_label', '车辆'),
+        # 计税方式：新账套建账时记下；老账套按行业推断（老行业都是一般计税）
+        'vat_mode': meta.get('vat_mode') or charts.INDUSTRIES.get(meta.get('industry', ''), {}).get('vat_mode', 'general'),
     }
 
 

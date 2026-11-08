@@ -173,7 +173,7 @@ function auxForm(type, item) {
 /* ================= 车辆台账 ================= */
 App.pages.vehicles = async (page) => {
   if (!hasFeature('vehicles')) {
-    page.innerHTML = pageHead('车辆台账', '') + '<div class="notice info">本账套所选行业没有车辆台账功能。汽车租赁、旅客运输、道路货物运输行业的账套才有车辆台账、自动折旧和单车盈利分析。</div>';
+    page.innerHTML = pageHead('车辆台账', '') + '<div class="notice info">本账套所选行业没有车辆台账功能。汽车租赁、旅客运输（各种计税方式）、道路货物运输行业的账套才有车辆台账、自动折旧和单车盈利分析。</div>';
     return;
   }
   const [data, rc] = await Promise.all([api('/api/vehicles'), api('/api/vehicle/reconcile')]);
@@ -198,7 +198,7 @@ App.pages.vehicles = async (page) => {
       <span class="muted" id="cnt"></span></div>
     <div class="tbl-wrap" style="max-height:60vh"><table class="tbl"><thead><tr><th>车牌号</th><th>车型</th><th>购置日期</th><th class="n">原值</th><th class="n">残值率</th><th class="n">折旧月数</th>
       <th class="n">月折旧额</th><th class="n">累计折旧</th><th class="n">净值</th><th>状态</th><th>操作</th></tr></thead><tbody id="list"></tbody></table></div>
-    <p class="hint">原值填不含税的购置成本（发票金额 − 进项税额，加上购置税等）。启用账套前已有的车辆，请填写“启用时已提累计折旧”，然后在“期初余额”中点“从车辆台账带入”。</p>`;
+    <p class="hint">原值：抵扣进项税的车辆填不含税的购置成本（发票金额 − 进项税额，加上购置税等）；不抵扣的车辆（如简易计税）填含税价加购置税等。启用账套前已有的车辆，请填写“启用时已提累计折旧”，然后在“期初余额”中点“从车辆台账带入”。</p>`;
   let shown = [];
   const draw = () => {
     const q = $('#q', page).value.trim().toUpperCase(), st = $('#st', page).value;
@@ -213,10 +213,7 @@ App.pages.vehicles = async (page) => {
         <button class="btn link danger" data-del="${v.id}">删除</button></td></tr>`).join('') || '<tr><td colspan="11" class="empty">没有车辆</td></tr>';
     const byId = id => vs.find(v => v.id == id);
     $$('[data-edit]', page).forEach(b => b.onclick = () => vehicleForm(byId(b.dataset.edit)));
-    $$('[data-buy]', page).forEach(b => b.onclick = async () => {
-      try { App.draft = await api('/api/vehicle/purchase_draft', { id: +b.dataset.buy }); go('voucher'); }
-      catch (e) { toast(e.message, 'err'); }
-    });
+    $$('[data-buy]', page).forEach(b => b.onclick = () => purchaseForm(byId(b.dataset.buy)));
     $$('[data-dis]', page).forEach(b => b.onclick = () => disposeForm(byId(b.dataset.dis)));
     $$('[data-undo]', page).forEach(b => b.onclick = async () => {
       if (!await confirmBox('撤销处置后车辆恢复为“在用”。如果已经保存了处置凭证，请记得一并删除。', '撤销处置')) return;
@@ -236,6 +233,27 @@ App.pages.vehicles = async (page) => {
   draw();
 };
 
+/* 购车凭证：选择进项税抵扣 13%，还是含税价全部计入原值（简易计税的账套默认后者） */
+function purchaseForm(v) {
+  const inclusive = App.meta.vat_mode === 'simple';
+  modal({
+    title: '生成购车凭证草稿', width: 560,
+    body: `<p class="hint">车辆：${esc(v.plate)} ${esc(v.model)}，台账原值 ${fmtN(v.original)}</p>
+      <label class="check" style="display:block;margin:8px 0"><input type="radio" name="buy-mode" value="deduct" ${inclusive ? '' : 'checked'}>
+        取得 13% 增值税专票，<b>抵扣进项税</b>（台账原值是不含税价；凭证：借 固定资产、进项税额，贷 应付账款）</label>
+      <label class="check" style="display:block;margin:8px 0"><input type="radio" name="buy-mode" value="inclusive" ${inclusive ? 'checked' : ''}>
+        <b>不抵扣</b>，含税价全部计入原值（台账原值是含税价；凭证：借 固定资产，贷 应付账款）</label>
+      <p class="hint">简易计税项目专用的车辆不能抵扣进项税，应选第二种；一般计税业务用的车辆取得专票可以抵扣，选第一种。拿不准请问税务顾问。</p>`,
+    buttons: [{ text: '取消' }, {
+      text: '生成凭证草稿', cls: 'primary', onClick: async el => {
+        const mode = ($('[name=buy-mode]:checked', el) || {}).value || 'deduct';
+        App.draft = await api('/api/vehicle/purchase_draft', { id: v.id, mode });
+        go('voucher');
+      },
+    }],
+  });
+}
+
 function vehicleForm(v) {
   const sp = App.meta.start_period;
   modal({
@@ -243,7 +261,7 @@ function vehicleForm(v) {
     body: `<div class="field-row"><div class="field"><span>车牌号</span><input type="text" name="plate" value="${esc(v ? v.plate : '')}"></div>
       <div class="field"><span>车型</span><input type="text" name="model" value="${esc(v ? v.model : '')}"></div></div>
       <div class="field-row"><div class="field"><span>购置日期</span><input type="date" name="purchase_date" value="${v ? v.purchase_date : today()}"></div>
-      <div class="field"><span>原值（不含税，元）</span><input type="text" class="num" name="original" value="${v ? amtInput(v.original) : ''}"></div></div>
+      <div class="field"><span>原值（${App.meta.vat_mode === 'simple' ? '含税' : '不含税'}，元）</span><input type="text" class="num" name="original" value="${v ? amtInput(v.original) : ''}"></div></div>
       <div class="field-row"><div class="field"><span>残值率（%）</span><input type="number" name="salvage_rate" value="${v ? v.salvage_bp / 100 : 5}" step="0.1"></div>
       <div class="field"><span>折旧月数</span><input type="number" name="life_months" value="${v ? v.life_months : 48}"></div></div>
       <div class="field"><span>启用账套时已提累计折旧（元）——只有 ${plabel(sp)} 之前购入的车辆才需要填</span><input type="text" class="num" name="opening_accum" value="${v ? amtInput(v.opening_accum) : ''}"></div>
@@ -578,140 +596,4 @@ App.pages.logs = async (page) => {
   const list = await api('/api/logs');
   page.innerHTML = pageHead('操作日志', '最近 300 条操作记录') + `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>时间</th><th>操作</th><th>内容</th></tr></thead><tbody>
     ${list.map(l => `<tr><td>${l.at}</td><td>${esc(l.action)}</td><td>${esc(l.detail)}</td></tr>`).join('')}</tbody></table></div>`;
-};
-
-/* ================= 软件更新 ================= */
-App.pages.update = async (page) => {
-  const [v, us, ds] = await Promise.all([api('/api/version'), api('/api/update/settings'), api('/api/desktop/status')]);
-  const modeNow = ds.mode === 'window' ? '现在是<b>独立窗口</b>。'
-    : `现在是<b>浏览器</b>${ds.reason ? '（' + esc(ds.reason) + '）' : ''}。`;
-  page.innerHTML = pageHead('软件更新', '更新只替换程序文件，账套数据不受影响') + `
-    <div class="card" style="max-width:820px">
-      <h2>当前版本：v${esc(v.version)}</h2>
-      <p class="hint">两种更新方法任选一种。更新前会自动备份所有账套，并把旧版程序保存到 backups/旧版本程序 文件夹；
-        <b>data 文件夹里的账套数据不会被改动</b>。更新完成后，点右上角“退出软件”，再重新打开软件即可。</p>
-    </div>
-    <div class="card" id="upd-progress" style="max-width:820px;display:none"></div>
-    <div class="card" style="max-width:820px">
-      <h2>方法一：选择更新包（不需要联网）</h2>
-      <p class="hint">拿到新版本的“更新包”（例如“明簿-更新包-v1.6.3.zip”，几百 KB，Windows 和 Mac 通用）后，不用解压，直接在这里选择它。
-        也可以选择完整安装包，效果一样。</p>
-      <div class="toolbar"><input type="file" id="upd-file" accept=".zip"><button class="btn primary" id="upd-btn">开始更新</button></div>
-    </div>
-    <div class="card" style="max-width:820px">
-      <h2>方法二：在线检查更新</h2>
-      <p class="hint">如果你把新版本发布在网上（例如 GitHub、Gitee 或自己的网站），在这里填写 latest.json 的地址，以后点“检查更新”就能自动下载安装。发布方法见“开发说明.md”。<br>国内网络连不上 GitHub 时，软件会自动改用国内加速地址下载，并核对多个来源的更新信息和 sha256 校验值。</p>
-      <div class="toolbar"><input type="text" id="upd-url" value="${esc(us.url || '')}" placeholder="https://…/latest.json" style="width:460px">
-        <button class="btn" id="url-save">保存地址</button><button class="btn primary" id="check">检查更新</button></div>
-      <div id="chk-res"></div>
-      <div class="toolbar" style="margin-top:8px"><label><input type="checkbox" id="auto-check" ${us.auto_check !== false ? 'checked' : ''}>
-        打开软件时自动检查新版本（有新版本时在右下角提示；连不上网时不提示）</label></div>
-    </div>
-    <div class="card" style="max-width:820px">
-      <h2>打开方式</h2>
-      <p class="hint">${modeNow}独立窗口像普通软件一样单独显示，关掉窗口就退出软件；打不开时会自动改用浏览器。
-        如果独立窗口用起来有问题，可以改回浏览器。改了以后，退出软件再重新打开才生效。</p>
-      <div class="toolbar"><label><input type="radio" name="ui-prefer" value="window" ${ds.prefer !== 'browser' ? 'checked' : ''}> 独立窗口（推荐）</label>
-        <label><input type="radio" name="ui-prefer" value="browser" ${ds.prefer === 'browser' ? 'checked' : ''}> 浏览器</label></div>
-    </div>
-    <p class="hint">软件文件夹：${esc(v.root)}<br>数据文件夹：${esc(v.data_dir)}</p>`;
-  // 两种方法共用的进度显示：后台每一步的进度由 /api/update/progress 提供
-  const box = $('#upd-progress', page);
-  const fmtB = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
-  const lock = on => { ['#upd-btn', '#check', '#do-online'].forEach(id => { const b = $(id, page); if (b) b.disabled = on; }); };
-  const render = st => {
-    if (!st || st.state === 'idle') { box.style.display = 'none'; return; }
-    box.style.display = '';
-    const idx = st.stages.findIndex(x => x.key === st.stage);
-    const steps = st.stages.map((x, i) => {
-      let cls = i < idx ? 'done' : i === idx ? 'cur' : '';
-      if (st.state === 'error' && i === idx) cls = 'fail';
-      if (st.state === 'done') cls = i < idx ? 'done' : 'cur';
-      const mark = cls === 'done' ? '✓' : cls === 'fail' ? '✕' : String(i + 1);
-      return `<li class="${cls}"><span class="dot">${mark}</span>${esc(x.name)}</li>`;
-    }).join('');
-    // 进度条：下载/安装等有数量的步骤按实际进度，其余步骤按“第几步”
-    let pct, detail = '';
-    if (st.total > 0 && st.state === 'running') {
-      pct = Math.min(100, Math.floor(st.done * 100 / st.total));
-      if (st.stage === 'download') {
-        detail = `已下载 ${fmtB(st.done)} / ${fmtB(st.total)}${st.speed ? ' · ' + fmtB(st.speed) + '/秒' : ''}`;
-      } else if (st.stage === 'install') detail = `已替换 ${st.done} / ${st.total} 个文件`;
-    } else if (st.stage === 'download' && st.state === 'running') {
-      pct = null; detail = st.done ? `已下载 ${fmtB(st.done)}（服务器没有告知文件大小）` : '正在连接…';
-    } else pct = st.state === 'done' ? 100 : null;
-    const overall = st.state === 'done' ? 100 : Math.round((Math.max(idx, 0) + (pct || 0) / 100) * 100 / (st.stages.length - 1));
-    const bar = pct === null && st.state === 'running'
-      ? `<div class="pbar busy"><i></i></div>` : `<div class="pbar${st.state === 'error' ? ' fail' : ''}"><i style="width:${pct === null ? 0 : pct}%"></i></div>`;
-    let head;
-    if (st.state === 'done') {
-      const r = st.result || {};
-      head = `<div class="notice ok">已从 v${esc(r.old_version)} 更新到 v${esc(r.new_version)}，共替换 ${r.files} 个文件。<br>
-        <b>请点右上角“退出软件”，然后重新打开软件</b>，新版本才会生效。旧版程序已备份到 ${esc(r.code_backup)}。</div>`;
-    } else if (st.state === 'error') {
-      head = `<div class="notice err"><b>更新没有完成：</b>${esc(st.error)}</div>`;
-    } else head = '';
-    box.innerHTML = `<h2>${st.state === 'running' ? '正在更新…' : st.state === 'done' ? '更新完成' : '更新失败'}
-        <span class="hint" style="font-weight:normal;margin-left:8px">总进度 ${st.state === 'error' ? '—' : overall + '%'} · 已用时 ${st.elapsed} 秒</span></h2>
-      <ol class="upd-steps">${steps}</ol>${head}
-      ${st.state === 'running' ? `<div class="upd-msg">${esc(st.message || '')}</div>${bar}
-        <div class="hint">${esc(detail)}${st.source ? `${detail ? ' · ' : ''}下载地址：<b>${esc(st.source)}</b>` : ''}</div>` : ''}
-      ${st.log.length ? `<details ${st.state === 'error' ? 'open' : ''} style="margin-top:8px"><summary class="hint">详细过程（${st.log.length} 条）</summary>
-        <pre class="upd-log">${esc(st.log.join('\n'))}</pre></details>` : ''}`;
-  };
-  let timer = null;
-  const poll = async () => {
-    let st;
-    try { st = await api('/api/update/progress'); }
-    catch (e) { if (!page.isConnected) return; timer = setTimeout(poll, 1500); return; }
-    if (!page.isConnected) return; // 已经离开这个页面
-    render(st);
-    lock(st.state === 'running');
-    if (st.state === 'running') timer = setTimeout(poll, 400);
-    else if (st.state === 'done') toast('更新完成，请退出软件后重新打开', 'ok');
-  };
-  const start = async (path, body) => {
-    clearTimeout(timer);
-    lock(true);
-    try { render(await api(path, body)); box.scrollIntoView({ block: 'nearest' }); poll(); }
-    catch (e) { lock(false); render({ state: 'error', stage: '', stages: [], error: e.message, log: [], elapsed: 0 }); }
-  };
-  // 打开这个页面时如果有更新正在进行（例如切换了标签页），接着显示进度
-  api('/api/update/progress').then(st => { if (st.state === 'running') poll(); }).catch(() => {});
-
-  $('#upd-btn', page).onclick = async () => {
-    const file = $('#upd-file', page).files[0];
-    if (!file) return toast('请先选择更新包', 'err');
-    if (!await confirmBox('开始更新吗？', '开始更新')) return;
-    box.style.display = '';
-    box.innerHTML = '<h2>正在更新…</h2><div class="upd-msg">正在读取更新包…</div><div class="pbar busy"><i></i></div>';
-    let data;
-    try { data = await fileToB64(file); } catch (e) { box.innerHTML = `<div class="notice err">读取文件失败：${esc(e.message)}</div>`; return; }
-    start('/api/update/start', { data });
-  };
-  page.querySelectorAll('[name="ui-prefer"]').forEach(r => r.onchange = async () => {
-    try { await api('/api/desktop/settings', { prefer: r.value }); toast('已保存，下次打开软件时生效', 'ok'); }
-    catch (e) { toast(e.message, 'err'); }
-  });
-  $('#auto-check', page).onchange = async e => {
-    try { await api('/api/update/settings', { auto_check: e.target.checked }); toast(e.target.checked ? '已打开自动检查，下次打开软件时生效' : '已关闭自动检查', 'ok'); }
-    catch (err) { toast(err.message, 'err'); }
-  };
-  $('#url-save', page).onclick = async () => {
-    try { await api('/api/update/settings', { url: $('#upd-url', page).value }); toast('已保存', 'ok'); } catch (e) { toast(e.message, 'err'); }
-  };
-  $('#check', page).onclick = async () => {
-    const res = $('#chk-res', page);
-    const url = $('#upd-url', page).value.trim();
-    res.innerHTML = '<div class="notice info">正在检查…（GitHub 连不上时会自动改用国内加速地址，可能要等十几秒）</div>';
-    try {
-      const r = await api('/api/update/check', { url });
-      const via = r.source && r.source !== '直连' ? `<div class="hint">（GitHub 直连失败，已通过加速地址 ${esc(r.source)} 获取）</div>` : '';
-      if (!r.has_update) { res.innerHTML = `<div class="notice ok">已经是最新版本（v${esc(r.current)}）。${via}</div>`; return; }
-      res.innerHTML = `<div class="notice info">发现新版本 <b>v${esc(r.latest)}</b>（当前 v${esc(r.current)}）。
-        ${r.notes ? `<div style="white-space:pre-wrap;margin-top:6px">${esc(r.notes)}</div>` : ''}${via}</div>
-        <button class="btn primary" id="do-online">下载并更新</button>`;
-      $('#do-online', res).onclick = () => start('/api/update/online/start', { url });
-    } catch (e) { res.innerHTML = `<div class="notice err">${esc(e.message)}</div>`; }
-  };
 };

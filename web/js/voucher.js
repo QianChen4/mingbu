@@ -40,6 +40,7 @@ App.pages.voucher = async (page, params) => {
   while (rows.length < 5) rows.push(blank());
 
   const vno = v ? `记-${String(v.number).padStart(4, '0')}` : '（保存后自动编号）';
+  { const tt = App.tabs.find(x => x.pane === page); if (tt) tt.label = v ? `${plabel(v.period)} ${vno}` : ''; }
   page.innerHTML = `
     <div class="page-head no-print"><div><h1>${v ? '查看 / 修改凭证' : '新增凭证'}</h1>
       <div class="sub">${v ? plabel(v.period) + ' ' + vno : '当前期间 ' + plabel(curP)}</div></div>
@@ -418,7 +419,7 @@ async function printVouchers(list) {
 /* ================= 凭证查询 ================= */
 App.pages.vouchers = async (page, params) => {
   const [dpf, dpt] = defaultRange();
-  const pf = +params.from || dpf, pt = +params.to || dpt;
+  const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
   page.innerHTML = `
     <div class="page-head"><div><h1>凭证查询</h1><div class="sub">查询、审核、打印和导出凭证</div></div></div>
     <div class="toolbar" id="flt">
@@ -444,6 +445,7 @@ App.pages.vouchers = async (page, params) => {
   let data = [];
   const load = async () => {
     const [a, b] = readRange(page);
+    remember(page, { from: a, to: b, status: $('[name=status]', page).value });
     data = await api('/api/vouchers?' + qs({ from: a, to: b, q: $('[name=q]', page).value.trim(), account: acc.dataset.value || '', status: $('[name=status]', page).value }));
     $('#list', page).innerHTML = data.map(v => `<tr data-id="${v.id}" class="clickable">
       <td><input type="checkbox" class="sel" value="${v.id}"></td><td>${plabel(v.period)}</td><td>${v.date}</td>
@@ -497,13 +499,14 @@ App.pages.vouchers = async (page, params) => {
     const [a, b] = readRange(page);
     exportXlsx('凭证明细', [{ name: '期间' }, { name: '日期', width: 12 }, { name: '凭证号' }, { name: '摘要', width: 26 }, { name: '科目编码' },
       { name: '科目名称', width: 28 }, { name: '辅助核算', width: 18 }, { name: '现金流量项目', width: 28 }, { name: '借方金额', type: 'money' },
-      { name: '贷方金额', type: 'money' }, { name: '状态' }, { name: '制单' }], rows, `${plabel(a)} 至 ${plabel(b)}`);
+      { name: '贷方金额', type: 'money' }, { name: '状态' }, { name: '制单' }], rows, rangeLabel(a, b));
   };
   $('#b-renum', page).onclick = async () => {
     const [a, b] = readRange(page);
-    if (a !== b) return toast('请把起止月份设为同一个月，再整理该月的凭证号', 'err');
-    if (!await confirmBox(`把 ${plabel(a)} 的凭证按日期重新从 1 号开始连续编号？`, '整理')) return;
-    try { const r = await api('/api/voucher/renumber', { period: a }); toast(`已整理 ${r.count} 张`, 'ok'); load(); } catch (e) { toast(e.message, 'err'); }
+    if (a.slice(0, 7) !== b.slice(0, 7)) return toast('请把起止日期设在同一个月里，再整理该月的凭证号', 'err');
+    const per = +a.slice(0, 4) * 100 + +a.slice(5, 7);
+    if (!await confirmBox(`把 ${plabel(per)} 的凭证按日期重新从 1 号开始连续编号？`, '整理')) return;
+    try { const r = await api('/api/voucher/renumber', { period: per }); toast(`已整理 ${r.count} 张`, 'ok'); load(); } catch (e) { toast(e.message, 'err'); }
   };
   await load();
 };

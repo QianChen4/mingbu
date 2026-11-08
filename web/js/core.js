@@ -108,9 +108,16 @@ async function fileToB64(file) {
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(bin);
 }
-async function api(path, body) {
+// 这些 POST 只是查询或下载，不算“改了数据”
+const READ_ONLY_POSTS = new Set(['/api/export/xlsx', '/api/update/check', '/api/data/scan', '/api/data/inspect', '/api/heartbeat',
+  '/api/lock/lock', '/api/lock/unlock', '/api/voucher/print', '/api/vehicle/purchase_draft', '/api/data/open_folder',
+  '/api/update/start', '/api/update/online/start', '/api/update/rollback', '/api/update/settings', '/api/restart', '/api/backup/now', '/api/lock/set', '/api/lock/options',
+  '/api/lock/disable', '/api/lock/recover', '/api/shutdown']);
+async function api(path, body, retried) {
   const opt = { method: body === undefined ? 'GET' : 'POST', headers: {} };
   if (App.cid) opt.headers['X-Company'] = App.cid;
+  const tok = lockToken();
+  if (tok) opt.headers['X-Unlock'] = tok;
   if (body !== undefined) {
     opt.headers['Content-Type'] = 'application/json';
     opt.body = JSON.stringify(body);
@@ -124,41 +131,36 @@ async function api(path, body) {
     return res;
   }
   const data = await res.json();
+  if (res.status === 401 && data.locked) {
+    if (!App.lock) App.lock = { enabled: true };
+    App.lock.enabled = true;
+    if (!retried) { await showLockScreen(); return api(path, body, true); }
+    const err = new Error(data.error); err.locked = true; throw err;
+  }
   if (!res.ok) throw new Error(data.error || '请求失败');
+  if (body !== undefined && !READ_ONLY_POSTS.has(path.split('?')[0])) App.dataVer++;
   return data;
 }
 function qs(obj) {
   return Object.entries(obj).filter(([k, v]) => v !== undefined && v !== null && v !== '')
     .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
 }
-/* ================= 独立桌面窗口 =================
- * 在独立窗口里运行时（app/desktop.py），页面里有 window.pywebview.api：
- * 下载文件改用“保存”对话框；有没保存的内容时，关窗口前先确认。用浏览器打开时这些都不起作用。 */
-function desktopApi() { return window.pywebview && window.pywebview.api && window.pywebview.api.save_file ? window.pywebview.api : null; }
-async function desktopSave(path, body, fallbackName) {
-  const r = await desktopApi().save_file(path, body === undefined ? null : body, App.cid || '', fallbackName || '下载');
-  if (r && r.error) throw new Error(r.error);
-  if (r && r.saved) toast('已保存到：' + r.saved, 'ok');
-}
-// 页面上的下载链接（如“下载账套数据文件”）
+/* 页面上的下载链接（如“下载账套数据文件”）：设了启动密码时要带上通行证 */
 document.addEventListener('click', e => {
   const a = e.target.closest && e.target.closest('a[href^="/api/"]');
-  if (!a || !desktopApi()) return;
+  if (!a || a.dataset.signed) return;
+  const tok = lockToken();
+  if (!tok) return;
   e.preventDefault();
-  desktopSave(a.getAttribute('href'), undefined, '下载').catch(err => toast(err.message, 'err'));
+  const href = a.getAttribute('href');
+  const b = document.createElement('a');
+  b.href = href + (href.includes('?') ? '&' : '?') + 'unlock=' + encodeURIComponent(tok);
+  b.dataset.signed = '1';
+  b.download = '';
+  document.body.appendChild(b); b.click(); setTimeout(() => b.remove(), 1000);
 });
-(() => {
-  let last = null;
-  setInterval(() => {
-    const api = desktopApi();
-    if (!api) return;
-    const dirty = !!document.querySelector('[data-dirty="1"]');
-    if (dirty !== last) { last = dirty; api.set_unsaved(dirty); }
-  }, 1000);
-})();
 
 async function apiFile(path, body, fallbackName) {
-  if (desktopApi()) return desktopSave(path, body, fallbackName);
   const res = await api(path, body);
   const blob = await res.blob();
   let name = fallbackName || '下载';
@@ -409,76 +411,50 @@ function yearOptions(sel) {
 function monthOptions(sel) {
   return Array.from({ length: 12 }, (_, i) => i + 1).map(m => `<option value="${m}" ${m === sel ? 'selected' : ''}>${m}月</option>`).join('');
 }
-function rangeLabel(pf, pt) { return pf === pt ? plabel(pf) : `${plabel(pf)} 至 ${plabel(pt)}`; }
-
-/**
- * 起止期间：起始年月 至 结束年月，可以跨年度（如 2026年9月 至 2027年2月）。
- * 起始期间不能晚于结束期间——选反了会自动调整。
- */
-function rangeControls(pf, pt) {
-  const y = p => Math.floor(p / 100), m = p => p % 100;
-  return `<span class="range">
-    <label>期间 <select name="y1">${yearOptions(y(pf))}</select><select name="m1">${monthOptions(m(pf))}</select></label>
-    <label>至 <select name="y2">${yearOptions(y(pt))}</select><select name="m2">${monthOptions(m(pt))}</select></label>
-    <select class="quick" title="快速选择期间">
-      <option value="">快速选择…</option>
-      <option value="month">本月</option><option value="quarter">本季度</option><option value="ytd">本年1月至今</option>
-      <option value="year">本年全年</option><option value="lastyear">上年全年</option><option value="last12">最近12个月</option>
-    </select></span>`;
+/* 账簿、报表都按日期查询：起始日期 至 结束日期（可以是某一天，也可以跨年度） */
+function isDate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')); }
+function rangeLabel(d1, d2) { return d1 === d2 ? d1 : `${d1} 至 ${d2}`; }
+function startDate() { const sp = App.meta.start_period; return `${Math.floor(sp / 100)}-${String(sp % 100).padStart(2, '0')}-01`; }
+function rangeControls(d1, d2) {
+  return `<span class="range"><label>日期 <input type="date" name="d1" value="${esc(d1)}"></label>
+    <label>至 <input type="date" name="d2" value="${esc(d2)}"></label></span>`;
 }
-function setRange(root, pf, pt) {
+function setRange(root, d1, d2) {
   const r = $('.range', root) || root;
-  $('[name=y1]', r).value = Math.floor(pf / 100); $('[name=m1]', r).value = pf % 100;
-  $('[name=y2]', r).value = Math.floor(pt / 100); $('[name=m2]', r).value = pt % 100;
+  $('[name=d1]', r).value = d1; $('[name=d2]', r).value = d2;
 }
 function readRange(root) {
   const r = $('.range', root) || root;
-  const a = +$('[name=y1]', r).value * 100 + +$('[name=m1]', r).value;
-  const b = +$('[name=y2]', r).value * 100 + +$('[name=m2]', r).value;
-  if (a > b) throw new Error('起始期间不能晚于结束期间');
+  let a = $('[name=d1]', r).value, b = $('[name=d2]', r).value;
+  if (!a && !b) throw new Error('请选择查询日期');
+  a = a || b; b = b || a;
+  if (a > b) throw new Error('起始日期不能晚于结束日期');
   return [a, b];
 }
-// 保证起止期间是正序：改了起始期间导致晚于结束期间时，把结束期间调成一样；反之亦然
+// 起止日期保持正序：改了起始日期导致晚于结束日期时，把结束日期调成一样；反之亦然
 document.addEventListener('change', e => {
   const r = e.target.closest && e.target.closest('.range');
-  if (!r) return;
-  const cur = App.meta ? App.meta.current_period : 0;
-  if (e.target.classList.contains('quick')) {
-    const v = e.target.value; e.target.value = '';
-    if (!v || !cur) return;
-    const y = Math.floor(cur / 100), m = cur % 100;
-    const q0 = Math.floor((m - 1) / 3) * 3 + 1;
-    let p1 = cur, p2 = cur;
-    if (v === 'quarter') { p1 = y * 100 + q0; p2 = y * 100 + q0 + 2; }
-    else if (v === 'ytd') { p1 = y * 100 + 1; }
-    else if (v === 'year') { p1 = y * 100 + 1; p2 = y * 100 + 12; }
-    else if (v === 'lastyear') { p1 = (y - 1) * 100 + 1; p2 = (y - 1) * 100 + 12; }
-    else if (v === 'last12') { p1 = nextP((y - 1) * 100 + m); }
-    // 年份下拉里没有的年份补上
-    [p1, p2].forEach(p => ['y1', 'y2'].forEach(n => {
-      const sel = $(`[name=${n}]`, r), yy = Math.floor(p / 100);
-      if (!Array.from(sel.options).some(o => +o.value === yy)) {
-        const o = document.createElement('option'); o.value = yy; o.textContent = yy + '年';
-        sel.appendChild(o); Array.from(sel.options).sort((a, b) => a.value - b.value).forEach(x => sel.appendChild(x));
-      }
-    }));
-    setRange(r, p1, p2);
-    return;
-  }
-  if (!['y1', 'm1', 'y2', 'm2'].includes(e.target.name)) return;
-  const a = +$('[name=y1]', r).value * 100 + +$('[name=m1]', r).value;
-  const b = +$('[name=y2]', r).value * 100 + +$('[name=m2]', r).value;
-  if (a <= b) return;
-  if (e.target.name === 'y1' || e.target.name === 'm1') setRange(r, a, a); else setRange(r, b, b);
-  toast('起始期间不能晚于结束期间，已自动调整');
+  if (!r || !['d1', 'd2'].includes(e.target.name)) return;
+  const a = $('[name=d1]', r), b = $('[name=d2]', r);
+  if (!a.value || !b.value || a.value <= b.value) return;
+  if (e.target.name === 'd1') b.value = a.value; else a.value = b.value;
+  toast('起始日期不能晚于结束日期，已自动调整');
 });
+/** 默认查询区间：当前会计期间所在年度 1 月 1 日（启用年度从启用日）到当前会计期间的最后一天 */
 function defaultRange() {
   const cur = App.meta.current_period;
-  const y = Math.floor(cur / 100);
-  return [Math.max(y * 100 + 1, App.meta.start_period), cur];
+  const y1 = `${Math.floor(cur / 100)}-01-01`;
+  return [y1 > startDate() ? y1 : startDate(), lastDay(cur)];
+}
+/** 期间参数兼容：YYYYMM 转成该月第一天 / 最后一天，日期原样返回 */
+function asDate(v, end) {
+  if (isDate(v)) return v;
+  const p = +v;
+  if (p > 190000 && p % 100 >= 1 && p % 100 <= 12) return end ? lastDay(p) : `${Math.floor(p / 100)}-${String(p % 100).padStart(2, '0')}-01`;
+  return '';
 }
 
-/* ================= 路由、多窗口标签页与页面框架 ================= */
+/* ================= 路由、标签页与页面框架 ================= */
 const APP_NAME = '明簿';
 const NAV = [
   ['日常', [['home', '工作台'], ['voucher', '凭证录入'], ['vouchers', '凭证查询']]],
@@ -486,35 +462,52 @@ const NAV = [
   ['报表', [['bs', '资产负债表'], ['is', '利润表'], ['cf', '现金流量表'], ['vprofit', '单车盈利分析', 'vehicles']]],
   ['期末', [['closing', '期末处理与结账']]],
   ['设置', [['accounts', '会计科目'], ['aux', '辅助核算项目'], ['vehicles', '车辆台账', 'vehicles'], ['opening', '期初余额'],
-    ['templates', '凭证模板'], ['import', '数据导入'], ['backup', '备份与恢复'], ['company', '账套信息'], ['logs', '操作日志'], ['update', '软件更新']]],
+    ['templates', '凭证模板'], ['import', '数据导入'], ['backup', '备份与恢复'], ['company', '账套信息'], ['logs', '操作日志'],
+    ['security', '启动密码'], ['datadir', '数据位置'], ['update', '软件更新']]],
 ];
 const PAGE_TITLES = {};
 NAV.forEach(([g, items]) => items.forEach(([k, t]) => PAGE_TITLES[k] = t));
+// 工作台和“设置”里的页面不进标签栏：同一时间只显示一个，点开就是最新的内容
+const SOLO_PAGES = new Set(['home']);
+NAV.find(g => g[0] === '设置')[1].forEach(([k]) => SOLO_PAGES.add(k));
+// 没有选账套时也能打开的页面
+const NO_COMPANY_PAGES = new Set(['update', 'security', 'datadir']);
 function hasFeature(f) { return !!(App.meta && (App.meta.features || []).includes(f)); }
 
-function parseHash() {
-  const h = location.hash.replace(/^#\/?/, '');
+function parseHash(h) {
+  h = (h === undefined ? location.hash : h).replace(/^#\/?/, '');
   const [name, query = ''] = h.split('?');
   const params = {};
   new URLSearchParams(query).forEach((v, k) => params[k] = v);
   return { name: name || 'home', params };
 }
-function go(name, params = {}) {
-  const q = qs(params);
-  const h = '#/' + name + (q ? '?' + q : '');
-  if (location.hash === h) render(); else location.hash = h;
+function setHash(name, params) {
+  const q = qs(params || {});
+  // 只改地址栏，不产生浏览历史（浏览器的“后退”不会把页面弄乱；返回用左上角的“← 返回”）
+  try { history.replaceState(null, '', '#/' + name + (q ? '?' + q : '')); } catch (e) { /* 忽略 */ }
 }
+/**
+ * 页面里的跳转（保存凭证后打开它、上一张/下一张、从余额表点进明细账等）。
+ * 和当前标签是同一个功能时，就在当前标签里换内容；否则新开一个标签。
+ */
+function go(name, params = {}) { navigate(name, params, 'auto'); }
 App.go = go;
 
 /*
- * 多窗口：每个功能一个标签页。切换标签时页面不重新加载，查询条件和结果都保留。
- * - 点左侧菜单：已打开的就切换过去，没打开的新开一个；
- * - 带参数的跳转（如从余额表点进明细账）：在对应标签里按新参数重新打开；
- * - 标签上的 ↻ 刷新当前标签，× 关闭标签；顶栏“全部刷新”（F9）刷新所有打开的标签。
+ * 标签页：
+ * - 点左侧菜单：新开一个空白的标签（默认查询条件）；同一个功能可以开好几个，比如两个明细账查不同科目；
+ * - 点上面的标签：回到之前查过的那一页，查询条件和结果都还在；
+ * - 其他标签里改了数据（录了凭证、结了账等），切回来时自动按原来的条件重新查询；正在录入还没保存的凭证不动；
+ * - 标签上的 ● 表示有没保存的内容，关闭时会先确认；↻ 刷新这个标签；× 关闭；
+ * - 工作台和“设置”里的页面不进标签栏。
  */
 App.tabs = [];
-App.activeTab = null;
-const MAX_TABS = 12;
+App.activeTab = null;   // 当前显示的页面：某个标签，或者 App.solo（工作台 / 设置页）
+App.solo = null;
+App.hist = [];          // “← 返回”用：之前看过的页面
+App.dataVer = 0;        // 每改一次数据加 1；标签记下自己加载时的版本，落后了就重新查询
+const MAX_TABS = 15;
+let tabSeq = 0;
 
 function frameEls() {
   const page = $('#page');
@@ -522,15 +515,22 @@ function frameEls() {
   return { bar: $('#tabbar', page), panes: $('#panes', page) };
 }
 function closeAllTabs() {
-  App.tabs = []; App.activeTab = null;
+  App.tabs = []; App.activeTab = null; App.solo = null; App.hist = [];
   $('#page').innerHTML = '';
+}
+function isDirty(t) { return !!(t && t.pane && t.pane.dataset.dirty === '1'); }
+function tabTitle(t) {
+  const p = t.params || {};
+  if (t.name === 'voucher' && p.id) return t.label || '凭证';
+  if (t.name === 'detail' && p.code) return '明细账 ' + p.code;
+  return PAGE_TITLES[t.name] || t.name;
 }
 function renderTabbar() {
   const { bar } = frameEls();
-  bar.innerHTML = App.tabs.map(t => `<div class="tab ${t === App.activeTab ? 'on' : ''}" data-name="${t.name}" title="${esc(t.title)}">
-      <span class="tab-title">${esc(t.title)}</span>
+  bar.innerHTML = App.tabs.map(t => `<div class="tab ${t === App.activeTab ? 'on' : ''}" data-id="${t.id}" title="${esc(tabTitle(t))}">
+      ${isDirty(t) ? '<span class="tab-dirty" title="有没保存的内容">●</span>' : ''}<span class="tab-title">${esc(tabTitle(t))}</span>
       ${t === App.activeTab ? '<button class="tab-btn" data-act="reload" title="刷新这个标签（重新读取最新数据）">↻</button>' : ''}
-      ${App.tabs.length > 1 ? '<button class="tab-btn" data-act="close" title="关闭">×</button>' : ''}</div>`).join('');
+      <button class="tab-btn" data-act="close" title="关闭">×</button></div>`).join('');
   const on = $('.tab.on', bar);
   if (on) {  // 当前标签不在可见范围时，把标签栏滚动过去
     const l = on.offsetLeft, r = l + on.offsetWidth;
@@ -538,54 +538,110 @@ function renderTabbar() {
     else if (r > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = r - bar.clientWidth + 12;
   }
   $$('.tab', bar).forEach(el => {
-    const t = App.tabs.find(x => x.name === el.dataset.name);
+    const t = App.tabs.find(x => String(x.id) === el.dataset.id);
     el.addEventListener('mousedown', e => { if (e.button === 1) { e.preventDefault(); closeTab(t); } });
     el.onclick = e => {
       const act = e.target.dataset && e.target.dataset.act;
       if (act === 'close') return closeTab(t);
       if (act === 'reload') return reloadTab(t);
-      activateTab(t, true);
+      showView(t);
     };
   });
+  renderBack();
 }
-function activateTab(t, updateHash) {
+// 有没保存的内容时，标签上显示 ●
+setInterval(() => {
+  const sig = App.tabs.map(t => t.id + (isDirty(t) ? '*' : '')).join(',');
+  if (sig !== App.dirtySig) { App.dirtySig = sig; if ($('#tabbar')) renderTabbar(); }
+}, 800);
+window.addEventListener('beforeunload', e => {
+  if (App.tabs.some(isDirty) && !App.quitting) { e.preventDefault(); e.returnValue = ''; }
+});
+
+/** 显示某个标签（或 App.solo）。pushHist=false 时不记入“返回”历史 */
+function showView(t, pushHist = true) {
+  closePicker();
+  if (pushHist && App.activeTab && App.activeTab !== t) {
+    App.hist.push(App.activeTab.solo ? { solo: App.activeTab.name, params: App.activeTab.params } : { tab: App.activeTab });
+    if (App.hist.length > 50) App.hist.shift();
+  }
   App.activeTab = t;
   App.tabs.forEach(x => x.pane.classList.toggle('on', x === t));
+  if (App.solo) App.solo.pane.classList.toggle('on', App.solo === t);
   renderTabbar();
   highlightNav(t.name);
-  if (updateHash && parseHash().name !== t.name) {
-    App.silentHash = true;
-    location.hash = '#/' + t.name;
-  }
+  setHash(t.name, t.params);
+  // 别的地方改过数据：按原来的条件重新查询（没保存的凭证除外）
+  if (!t.solo && t.ver < App.dataVer && !isDirty(t) && !t.loading) loadIntoTab(t, t.params || {});
 }
-function closeTab(t) {
+function renderBack() {
+  const b = $('#go-back');
+  if (b) b.style.visibility = App.hist.some(h => h.solo || App.tabs.includes(h.tab)) ? '' : 'hidden';
+}
+function goBack() {
+  while (App.hist.length) {
+    const h = App.hist.pop();
+    if (h.tab && App.tabs.includes(h.tab)) return showView(h.tab, false);
+    if (h.solo) return openSolo(h.solo, h.params || {}, false);
+  }
+  renderBack();
+}
+async function closeTab(t) {
   const i = App.tabs.indexOf(t);
   if (i < 0) return;
+  if (isDirty(t)) {
+    if (App.activeTab !== t) showView(t);
+    if (!await confirmBox(`“${tabTitle(t)}”里有没保存的内容，关闭后这些内容就没有了。确定关闭吗？`, '关闭', true)) return;
+  }
   closePicker();
   t.pane.remove();
   App.tabs.splice(i, 1);
   if (App.activeTab === t) {
-    const next = App.tabs[Math.min(i, App.tabs.length - 1)];
-    if (next) activateTab(next, true); else go('home');
+    App.activeTab = null;
+    // 优先回到打开它之前的页面
+    let back = null;
+    while (App.hist.length && !back) {
+      const h = App.hist.pop();
+      if (h.tab && App.tabs.includes(h.tab)) back = h.tab;
+      else if (h.solo) back = h;
+    }
+    if (back && back.solo) openSolo(back.solo, back.params || {}, false);
+    else if (back) showView(back, false);
+    else if (App.tabs.length) showView(App.tabs[Math.min(i, App.tabs.length - 1)], false);
+    else openSolo('home', {}, false);
   } else renderTabbar();
 }
 async function loadIntoTab(t, params) {
   const fn = App.pages[t.name];
   t.params = params;
+  t.ver = App.dataVer;
+  t.loading = true;
   delete t.pane.dataset.dirty;
   t.pane.innerHTML = '<div class="empty">加载中…</div>';
   t.pane.scrollTop = 0;
   try { await fn(t.pane, params); }
-  catch (e) { t.pane.innerHTML = `<div class="notice err">${esc(e.message)}</div>`; console.error(e); }
+  catch (e) { if (!e.locked) t.pane.innerHTML = `<div class="notice err">${esc(e.message)}</div>`; console.error(e); }
+  finally { t.loading = false; }
+  if (App.tabs.includes(t)) renderTabbar();
+  if (App.activeTab === t) setHash(t.name, t.params);
 }
-/** 重新加载某个标签（默认当前标签），保留它原来的参数 */
+/** 重新加载某个标签（默认当前页面），保留它现在的查询条件 */
 async function reloadTab(t) {
   t = t || App.activeTab;
-  if (!t) return render();
+  if (!t) return navigate(parseHash().name, parseHash().params, 'auto');
   await loadIntoTab(t, t.params || {});
 }
 App.reloadTab = reloadTab;
-/** 一键刷新：重新读取账套信息，再把所有打开的标签按各自原来的条件重新加载。
+/** 页面查询时调用：记下这个标签现在的查询条件，以后自动重新查询、刷新时都用它 */
+function remember(page, params) {
+  const t = App.tabs.find(x => x.pane === page) || (App.solo && App.solo.pane === page ? App.solo : null);
+  if (!t) return;
+  t.params = Object.assign({}, params);
+  t.ver = App.dataVer;
+  if (App.activeTab === t) setHash(t.name, t.params);
+  if (App.tabs.includes(t)) renderTabbar();
+}
+/** 一键刷新：重新读取账套信息，再把所有打开的标签按各自的条件重新加载。
  *  正在录入、还没保存的凭证不刷新，免得辛苦录的内容丢掉。 */
 let reloadingAll = false;
 async function reloadAllTabs() {
@@ -599,10 +655,11 @@ async function reloadAllTabs() {
     let n = 0;
     for (const t of App.tabs.slice()) {
       if (!App.tabs.includes(t)) continue;
-      if (t.pane.dataset.dirty === '1') { skipped.push(t.title); continue; }
+      if (isDirty(t)) { skipped.push(tabTitle(t)); continue; }
       await loadIntoTab(t, t.params || {});
       n++;
     }
+    if (App.activeTab && App.activeTab.solo) await loadIntoTab(App.activeTab, App.activeTab.params || {});
     renderTabbar();
     if (skipped.length) toast(`已刷新 ${n} 个标签；“${skipped.join('、')}”有未保存的修改，没有刷新（保存后再点一次即可）`, 'warn');
     else toast(`已刷新全部 ${n} 个标签`, 'ok');
@@ -611,108 +668,281 @@ async function reloadAllTabs() {
 }
 App.reloadAllTabs = reloadAllTabs;
 function highlightNav(name) {
-  $$('#sidebar .nav-group a').forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#/' + name));
+  $$('#sidebar .nav-group a').forEach(a => a.classList.toggle('active', a.dataset.page === name));
 }
 
 function renderChrome() {
   const side = $('#sidebar'), top = $('#topbar');
   if (!App.cid || !App.meta) {
     side.classList.add('hidden');
+    const name = parseHash().name;
     top.innerHTML = `<span class="topbar-company">${APP_NAME}</span>
-      ${parseHash().name === 'update' ? '<a href="#/companies" class="btn small">← 返回账套列表</a>' : ''}<span class="topbar-spacer"></span>
+      ${NO_COMPANY_PAGES.has(name) ? '<a href="#/companies" class="btn small">← 返回账套列表</a>' : ''}<span class="topbar-spacer"></span>
+      ${App.lock && App.lock.enabled ? '<button class="btn small" data-lock title="锁定软件，要输入启动密码才能继续用">锁定</button>' : ''}
       <button class="btn small" data-quit>退出软件</button>`;
     $('[data-quit]', top).onclick = quitApp;
+    const lk = $('[data-lock]', top); if (lk) lk.onclick = lockNow;
     return;
   }
   side.classList.remove('hidden');
-  const cur = App.activeTab ? App.activeTab.name : parseHash().name;
-  side.innerHTML = `<div class="brand">${APP_NAME}<small>${esc(App.meta.industry_name || '')} · ${esc(App.meta.standard_name || '')}${App.version ? '<br>v' + esc(App.version) : ''}</small></div>` + NAV.map(([g, items]) =>
+  const cur = App.activeTab ? App.activeTab.name : '';
+  side.innerHTML = `<div class="side-scroll"><div class="brand">${APP_NAME}<small>${esc(App.meta.industry_name || '')} · ${esc(App.meta.standard_name || '')}${App.version ? '<br>v' + esc(App.version) : ''}</small></div>` + NAV.map(([g, items]) =>
     `<div class="nav-group"><div>${g}</div>${items.filter(([k, t, f]) => !f || hasFeature(f)).map(([k, t]) =>
-      `<a href="#/${k}" class="${k === cur ? 'active' : ''}">${t}</a>`).join('')}</div>`).join('');
+      `<a href="#/${k}" data-page="${k}" class="${k === cur ? 'active' : ''}">${t}</a>`).join('')}</div>`).join('') +
+    `</div><div class="side-foot">
+      ${App.lock && App.lock.enabled ? '<button class="side-btn" data-lock title="锁定软件，要输入启动密码才能继续用">🔒 锁定</button>' : ''}
+      <button class="side-btn" data-quit title="关闭软件（后台程序也会一起退出）">⏻ 退出软件</button></div>`;
+  $$('.nav-group a', side).forEach(a => a.onclick = e => { e.preventDefault(); navigate(a.dataset.page, {}, 'new'); });
+  $('[data-quit]', side).onclick = quitApp;
+  const lk = $('[data-lock]', side); if (lk) lk.onclick = lockNow;
   const m = App.meta;
-  top.innerHTML = `<span class="topbar-company">${esc(m.company_name)}</span>
+  top.innerHTML = `<button class="btn small" id="go-back" title="回到上一个看过的页面">← 返回</button>
+    <span class="topbar-company">${esc(m.company_name)}</span>
     <span class="topbar-period">当前会计期间：<b>${plabel(m.current_period)}</b></span>
     ${m.closed.length ? `<span class="pill gray">已结账至 ${plabel(m.closed[m.closed.length - 1])}</span>` : ''}
     <span class="topbar-spacer"></span>
     <button class="btn small" id="reload-all" title="重新读取最新数据，把所有打开的标签都刷新一遍（快捷键 F9）">⟳ 全部刷新</button>
     <a href="#/voucher?new=1" class="btn primary small">＋ 新增凭证</a>
-    <button class="btn small" id="switch-company">切换账套</button>
-    <button class="btn small" data-quit title="关闭软件后台程序">退出软件</button>`;
-  $('#switch-company').onclick = () => { App.cid = null; store('cid', ''); App.meta = null; closeAllTabs(); go('companies'); };
-  $('[data-quit]', top).onclick = quitApp;
+    <button class="btn small" id="switch-company">切换账套</button>`;
+  $('#go-back').onclick = goBack;
+  $('#switch-company').onclick = async () => {
+    if (App.tabs.some(isDirty) && !await confirmBox('有凭证还没保存，切换账套后这些内容就没有了。确定切换吗？', '切换', true)) return;
+    App.cid = null; store('cid', ''); App.meta = null; closeAllTabs(); navigate('companies', {}, 'new');
+  };
   $('#reload-all').onclick = reloadAllTabs;
+  renderBack();
 }
 
 async function quitApp() {
-  if (!await confirmBox('退出软件吗？退出后要再次使用，请重新双击软件图标。', '退出')) return;
+  const dirty = App.tabs.filter(isDirty).map(tabTitle);
+  const msg = (dirty.length ? `“${dirty.join('、')}”还有没保存的内容，退出后就没有了。\n\n` : '') +
+    '退出软件吗？退出后要再次使用，请重新双击软件图标。';
+  if (!await confirmBox(msg, '退出', !!dirty.length)) return;
+  App.quitting = true;
   try { await api('/api/shutdown', {}); } catch (e) { /* 已经退出 */ }
+  stopHeartbeat();
   document.body.innerHTML = `<div style="max-width:520px;margin:18vh auto;text-align:center;font-family:var(--font);color:#1c2430">
-    <h2>软件已退出</h2><p style="color:#4a5565;line-height:1.8">${desktopApi() ? '窗口马上会自动关闭。' : '现在可以关闭这个浏览器窗口。'}<br>下次使用时，双击“${APP_NAME}”图标即可。</p></div>`;
+    <h2>软件已退出</h2><p style="color:#4a5565;line-height:1.8">现在可以关闭这个窗口。<br>下次使用时，双击“${APP_NAME}”图标即可。</p></div>`;
+  setTimeout(() => { try { window.close(); } catch (e) { /* 浏览器不让关就留着提示 */ } }, 600);
 }
 
-async function render() {
+/** 打开工作台或设置里的页面（不进标签栏） */
+async function openSolo(name, params, pushHist = true) {
+  const { panes } = frameEls();
+  if (!App.solo) {
+    const pane = document.createElement('div');
+    pane.className = 'pane';
+    panes.appendChild(pane);
+    App.solo = { solo: true, name, pane, params: {} };
+  }
+  const s = App.solo;
+  s.name = name;
+  showView(s, pushHist);
+  await loadIntoTab(s, params);
+}
+
+/** 打开一个功能。mode：'new' 新开标签（左侧菜单、页面里的链接）；'auto' 同一个功能时在当前标签里换内容 */
+async function navigate(name, params = {}, mode = 'new') {
   closePicker();
-  if (App.silentHash) { App.silentHash = false; return; }
-  const { name, params } = parseHash();
-  if (!App.cid && name === 'update') { // 还没选账套时（例如从右下角新版本提示过来），也能打开“软件更新”
+  if (!App.cid && NO_COMPANY_PAGES.has(name)) { // 还没选账套时（例如从右下角新版本提示过来），也能打开“软件更新”等
     closeAllTabs();
+    setHash(name, params);
     renderChrome();
-    $('#page').innerHTML = '<div class="pane on solo" style="position:relative;flex:1"></div>';
-    return App.pages.update($('#page .solo'), params);
+    $('#page').innerHTML = '<div class="pane on solo"></div>';
+    try { await App.pages[name]($('#page .solo'), params); } catch (e) { if (!e.locked) toast(e.message, 'err'); }
+    return;
   }
   if (!App.cid || name === 'companies') {
     App.cid = null;
     closeAllTabs();
+    setHash('companies', {});
     renderChrome();
     $('#page').innerHTML = '<div class="pane on solo"></div>';
-    return App.pages.companies($('#page .solo'), params);
+    try { await App.pages.companies($('#page .solo'), params); } catch (e) { if (!e.locked) toast(e.message, 'err'); }
+    return;
   }
   if (!App.meta) {
     try { await refreshMeta(); }
-    catch (e) { App.cid = null; store('cid', ''); toast(e.message, 'err'); return go('companies'); }
+    catch (e) { if (e.locked) return; App.cid = null; store('cid', ''); toast(e.message, 'err'); return navigate('companies'); }
   }
-  renderChrome();
   if (!App.pages[name]) { toast('页面不存在', 'err'); return; }
+  if (!$('#sidebar').innerHTML || $('#sidebar').classList.contains('hidden')) renderChrome();
+  if (SOLO_PAGES.has(name)) return openSolo(name, params);
+  const cur = App.activeTab;
+  // 页面里的跳转，和当前标签是同一个功能：在当前标签里换内容
+  if (mode === 'auto' && cur && !cur.solo && cur.name === name) {
+    if (isDirty(cur) && !await confirmBox('这个标签里有没保存的内容，离开后这些内容就没有了。确定离开吗？', '离开', true)) return;
+    return loadIntoTab(cur, params);
+  }
+  // 已经开着一模一样的标签（例如同一张凭证），直接切过去
+  const key = qs(params);
+  const same = key && !params.new && !params.t && App.tabs.find(x => x.name === name && qs(x.params || {}) === key && !isDirty(x));
+  if (same) return showView(same);
   const { panes } = frameEls();
-  let t = App.tabs.find(x => x.name === name);
-  const hasParams = Object.keys(params).length > 0;
-  // 从车辆台账点“购车凭证”/“处置”时会带一张凭证草稿（App.draft）过来：
-  // 即使“凭证录入”标签已经开着，也要重新打开它把草稿填进去，否则看起来就是“跳过去了但什么都没有”。
-  const pendingDraft = name === 'voucher' && !!App.draft;
-  if (t && pendingDraft && t.pane.dataset.dirty === '1') {
-    activateTab(t, false);
-    if (!await confirmBox('“凭证录入”里还有没保存的内容。要放弃这些内容，换成刚生成的凭证草稿吗？', '换成草稿')) {
-      App.draft = null;
-      toast('已保留原来的内容，草稿没有带入', 'warn');
-      return;
-    }
+  if (App.tabs.length >= MAX_TABS) {
+    const old = App.tabs.find(x => x !== cur && !isDirty(x));
+    if (!old) return toast(`最多同时开 ${MAX_TABS} 个标签，请先关掉一些`, 'warn');
+    old.pane.remove(); App.tabs.splice(App.tabs.indexOf(old), 1);
   }
-  if (t && !hasParams && !pendingDraft) { activateTab(t, false); return; }
-  if (!t) {
-    if (App.tabs.length >= MAX_TABS) {
-      const old = App.tabs.find(x => x !== App.activeTab);
-      if (old) { old.pane.remove(); App.tabs.splice(App.tabs.indexOf(old), 1); }
-    }
-    const pane = document.createElement('div');
-    pane.className = 'pane';
-    panes.appendChild(pane);
-    t = { name, title: PAGE_TITLES[name] || name, pane, params: {} };
-    App.tabs.push(t);
-  }
-  activateTab(t, false);
+  const pane = document.createElement('div');
+  pane.className = 'pane';
+  panes.appendChild(pane);
+  const t = { id: ++tabSeq, name, pane, params: {}, ver: App.dataVer };
+  // 新标签放在当前标签后面
+  const at = cur && !cur.solo ? App.tabs.indexOf(cur) + 1 : App.tabs.length;
+  App.tabs.splice(at, 0, t);
+  showView(t);
   await loadIntoTab(t, params);
 }
+App.navigate = navigate;
 
-App.start = () => {
+// 页面里的 #/ 链接：新开标签（不经过浏览器的地址历史）
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('a[href^="#/"]');
+  if (!a || e.defaultPrevented || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  e.preventDefault();
+  const { name, params } = parseHash(a.getAttribute('href'));
+  navigate(name, params, 'new');
+});
+
+App.start = async () => {
   App.cid = store('cid') || null;
-  api('/api/version').then(v => { App.version = v.version; App.root = v.root; App.dataDir = v.data_dir; renderChrome(); }).catch(() => {});
-  window.addEventListener('hashchange', render);
+  try {
+    const v = await api('/api/version');
+    App.version = v.version; App.root = v.root; App.dataDir = v.data_dir; App.started = v.started;
+  } catch (e) { /* 后台还没起来，下面的请求会提示 */ }
+  try { App.lock = await api('/api/lock/status'); } catch (e) { App.lock = null; }
+  startHeartbeat();
+  window.addEventListener('hashchange', () => { const { name, params } = parseHash(); navigate(name, params, 'new'); });
   document.addEventListener('keydown', e => {
     if (e.key === 'F9' && App.cid && App.meta && !document.querySelector('.modal-mask')) { e.preventDefault(); reloadAllTabs(); }
   });
-  render();
+  if (App.lock && App.lock.enabled && !App.lock.unlocked) await showLockScreen();
+  const { name, params } = parseHash();
+  await navigate(name, params, 'new');
   setTimeout(autoCheckUpdate, 3000); // 等界面先打开，再在后台查新版本
 };
+
+/* ================= 心跳：所有窗口都关掉后，后台程序自动退出 ================= */
+const PAGE_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+let hbTimer = null;
+function startHeartbeat() {
+  const beat = async () => {
+    try {
+      const res = await fetch('/api/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: PAGE_ID }) });
+      const r = await res.json();
+      // 后台程序重启过（例如更新后点了“立即重启”）：刷新页面，用新版本
+      if (App.started && r.started && r.started !== App.started && !App.quitting) {
+        App.quitting = true;
+        location.reload();
+        return;
+      }
+    } catch (e) { /* 后台暂时连不上 */ }
+    // 闲置自动锁定：后台判断通行证过期后，这里马上盖上锁屏
+    if (App.lock && App.lock.enabled && !$('#lock-screen')) {
+      try {
+        const st = await fetch('/api/lock/status', { headers: { 'X-Unlock': lockToken() } }).then(r => r.json());
+        if (st.enabled && !st.unlocked) showLockScreen();
+      } catch (e) { /* 忽略 */ }
+    }
+  };
+  beat();
+  hbTimer = setInterval(beat, 5000);
+  window.addEventListener('pagehide', () => {
+    try { navigator.sendBeacon('/api/heartbeat', new Blob([JSON.stringify({ id: PAGE_ID, bye: true })], { type: 'application/json' })); } catch (e) { /* 忽略 */ }
+  });
+}
+function stopHeartbeat() { clearInterval(hbTimer); }
+
+/* ================= 启动密码：锁屏 ================= */
+function lockToken() { try { return sessionStorage.getItem('unlock') || ''; } catch (e) { return ''; } }
+function setLockToken(t) { try { sessionStorage.setItem('unlock', t || ''); } catch (e) { /* 忽略 */ } }
+async function lockNow() {
+  try { await api('/api/lock/lock', {}); } catch (e) { /* 忽略 */ }
+  setLockToken('');
+  showLockScreen();
+}
+let lockWaiters = null;
+/** 盖上锁屏，输对密码后 resolve。已经盖着时返回同一个等待。 */
+function showLockScreen() {
+  if (lockWaiters) return lockWaiters.promise;
+  let resolve;
+  const promise = new Promise(r => resolve = r);
+  lockWaiters = { promise, resolve };
+  closePicker();
+  $$('.modal-mask').forEach(m => m.style.visibility = 'hidden');
+  const box = document.createElement('div');
+  box.id = 'lock-screen';
+  const hint = App.lock && App.lock.hint ? `<div class="hint">密码提示：${esc(App.lock.hint)}</div>` : '';
+  const drawLogin = () => {
+    box.innerHTML = `<div class="lock-card"><img src="app.png" alt="" class="lock-logo"><h2>${APP_NAME} 已锁定</h2>
+      <p class="hint">请输入启动密码</p>
+      <input type="password" id="lk-pw" autocomplete="current-password" placeholder="启动密码">${hint}
+      <div class="lock-err" id="lk-err"></div>
+      <button class="btn primary" id="lk-ok">解锁</button>
+      <div class="lock-links"><a href="javascript:void 0" id="lk-forgot">忘记密码？</a> · <a href="javascript:void 0" id="lk-quit">退出软件</a></div></div>`;
+    const pw = $('#lk-pw', box), err = $('#lk-err', box);
+    const ok = async () => {
+      err.textContent = '';
+      try {
+        const r = await fetch('/api/lock/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw.value }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || '解锁失败');
+        done(d.token);
+      } catch (e) { err.textContent = e.message; pw.select(); }
+    };
+    $('#lk-ok', box).onclick = ok;
+    pw.onkeydown = e => { if (e.key === 'Enter') ok(); };
+    $('#lk-forgot', box).onclick = drawRecover;
+    $('#lk-quit', box).onclick = async () => {
+      App.quitting = true;
+      try { await fetch('/api/shutdown', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) { /* 忽略 */ }
+      stopHeartbeat();
+      box.innerHTML = `<div class="lock-card"><h2>软件已退出</h2><p class="hint">现在可以关闭这个窗口。</p></div>`;
+      setTimeout(() => { try { window.close(); } catch (e) { /* 忽略 */ } }, 600);
+    };
+    setTimeout(() => pw.focus(), 50);
+  };
+  const drawRecover = () => {
+    box.innerHTML = `<div class="lock-card" style="width:420px"><h2>用恢复码重设密码</h2>
+      <p class="hint">恢复码是设置启动密码时显示的那串字母和数字（例如 ABCD-EFGH-JKLM-NPQR）。</p>
+      <input type="text" id="lk-code" placeholder="恢复码" style="text-transform:uppercase">
+      <input type="password" id="lk-new" placeholder="新密码（至少 4 位）" autocomplete="new-password">
+      <input type="password" id="lk-new2" placeholder="再输一次新密码" autocomplete="new-password">
+      <div class="lock-err" id="lk-err"></div>
+      <button class="btn primary" id="lk-ok">重设密码并解锁</button>
+      <p class="hint" style="text-align:left;margin-top:14px">恢复码也找不到了？先退出软件，再打开数据文件夹<br><b>${esc(App.dataDir || 'data')}</b><br>
+        删除里面的 <b>security.json</b> 文件，启动密码就取消了，账套数据不受影响。</p>
+      <div class="lock-links"><a href="javascript:void 0" id="lk-back">← 返回输入密码</a></div></div>`;
+    const err = $('#lk-err', box);
+    $('#lk-back', box).onclick = drawLogin;
+    $('#lk-ok', box).onclick = async () => {
+      err.textContent = '';
+      const a = $('#lk-new', box).value, b = $('#lk-new2', box).value;
+      if (a !== b) { err.textContent = '两次输入的新密码不一样'; return; }
+      try {
+        const r = await fetch('/api/lock/recover', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: $('#lk-code', box).value, password: a }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || '重设失败');
+        box.innerHTML = `<div class="lock-card" style="width:420px"><h2>密码已重设</h2>
+          <p>新的恢复码（旧的已经作废），请抄下来或拍照，放在安全的地方：</p>
+          <div class="recovery-code">${esc(d.recovery_code)}</div>
+          <button class="btn primary" id="lk-go">我已记下，进入软件</button></div>`;
+        $('#lk-go', box).onclick = () => done(d.token);
+      } catch (e) { err.textContent = e.message; }
+    };
+  };
+  const done = token => {
+    setLockToken(token);
+    box.remove();
+    $$('.modal-mask').forEach(m => m.style.visibility = '');
+    const w = lockWaiters; lockWaiters = null;
+    w.resolve();
+  };
+  drawLogin();
+  document.body.appendChild(box);
+  return promise;
+}
 
 /* 打开软件时自动查一次新版本，有就在右下角提示；连不上不提示（设置 → 软件更新 里可以关掉） */
 async function autoCheckUpdate() {
@@ -728,7 +958,7 @@ async function autoCheckUpdate() {
   const close = () => box.remove();
   $('.x', box).onclick = close;
   $('[data-later]', box).onclick = close;
-  $('[data-go]', box).onclick = () => { close(); location.hash = '#/update'; };
+  $('[data-go]', box).onclick = () => { close(); navigate('update', {}, 'new'); };
   document.body.appendChild(box);
 }
 
@@ -746,7 +976,8 @@ App.pages.companies = async (page) => {
         ${c.broken ? '' : `<a class="btn small" style="margin-top:10px" href="/api/company/export?company=${c.id}" data-stop>导出这个账套</a>`}
       </div>`).join('')}
     </div>
-    ${list.length ? '' : '<div class="notice info">还没有账套。请先在下面新建一个。</div>'}
+    ${list.length ? '' : `<div class="notice info">这里还没有账套。正在电脑上找以前用过的账套，找到了可以直接导入；没有的话请在下面新建一个。</div>
+      <div id="old-found"></div>`}
     <div class="card" style="margin-top:22px;max-width:560px">
       <h2>新建账套</h2>
       <div class="field"><span>公司名称</span><input type="text" name="name" placeholder="例如：某某有限公司"></div>
@@ -756,7 +987,7 @@ App.pages.companies = async (page) => {
       </div>
       <div class="field-row">
         <div class="field"><span>执行的会计准则</span><select name="standard">${opts.standards.map(o => `<option value="${o.code}">${esc(o.name)}</option>`).join('')}</select></div>
-        <div class="field"><span>行业</span><select name="industry">${opts.industries.map(o => `<option value="${o.code}">${esc(o.name)}</option>`).join('')}</select></div>
+        <div class="field"><span>行业</span><select name="industry">${opts.industries.map(o => `<option value="${o.code}" ${o.code === opts.default_industry ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></div>
       </div>
       <p class="hint" id="ind-desc"></p>
       <div class="field"><span>会计科目从哪里来</span><select name="copy_from">
@@ -782,7 +1013,18 @@ App.pages.companies = async (page) => {
       <p class="hint">覆盖前会自动备份本机原来的账套；如果本机的数据比导入的文件更新，会先提醒你确认。</p>
       <div id="imp-res"></div>
     </div>
-    <p class="hint">软件版本 ${esc(App.version || '')}　数据文件夹：${esc(App.dataDir || '')}</p></div>`;
+    <p class="hint">软件版本 v${esc(App.version || '')}　数据文件夹：${esc(App.dataDir || '')}</p>
+    <div class="toolbar"><a class="btn small" href="#/datadir">数据位置 / 找回旧账套</a><a class="btn small" href="#/security">启动密码</a><a class="btn small" href="#/update">软件更新</a></div></div>`;
+  if (!list.length) {
+    const box = $('#old-found', page);
+    box.innerHTML = '<div class="hint">正在查找…</div>';
+    api('/api/data/scan', {}).then(r => {
+      if (!box.isConnected) return;
+      if (!r.found.length) { box.innerHTML = '<div class="hint">没有找到以前的账套。</div>'; return; }
+      box.innerHTML = '<h2>找到了以前的账套</h2>' + oldDataHtml(r.found);
+      bindOldData(box, r.found, () => setTimeout(() => navigate('companies'), 1200));
+    }).catch(() => { if (box.isConnected) box.innerHTML = ''; });
+  }
   $$('[data-stop]', page).forEach(a => a.addEventListener('click', e => e.stopPropagation()));
   const showDesc = () => {
     const ind = opts.industries.find(o => o.code === $('[name=industry]', page).value);

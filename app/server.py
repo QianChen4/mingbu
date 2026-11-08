@@ -1,18 +1,22 @@
 """
-本地 Web 服务：只监听本机 127.0.0.1，界面（独立窗口或浏览器）通过 /api/... 读写数据。
+本地 Web 服务：只监听本机 127.0.0.1，界面（浏览器的应用模式窗口）通过 /api/... 读写数据。
 """
 import base64
 import json
 import mimetypes
 import os
+import subprocess
+import sys
+import threading
+import time
 import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import db, desktop, ledger, vouchers as V, vehicles as VH, closing as C, reports as R, io_utils as IO, updater, VERSION
+from . import db, paths, desktop, applock, migrate, ledger, vouchers as V, vehicles as VH, closing as C, reports as R, io_utils as IO, updater, VERSION
 from .db import AppError
 
-WEB_DIR = os.path.join(db.ROOT, 'web')
+WEB_DIR = os.path.join(paths.CODE_DIR, 'web')
 
 GET_ROUTES = {}
 POST_ROUTES = {}
@@ -57,7 +61,7 @@ def api_companies(conn, q):
 @post('/api/companies/create', needs_company=False)
 def api_company_create(conn, b):
     cid = db.create_company(b.get('name'), b.get('start_year'), b.get('start_month'), b.get('copy_from') or '',
-                            b.get('standard') or 'enterprise', b.get('industry') or 'general')
+                            b.get('standard') or 'enterprise', b.get('industry') or None)
     return {'id': cid}
 
 
@@ -81,7 +85,92 @@ def api_aux_type_delete(conn, b):
 
 @get('/api/version', needs_company=False)
 def api_version(conn, q):
-    return {'version': VERSION, 'root': db.ROOT, 'data_dir': db.DATA_DIR}
+    return {'version': VERSION, 'root': db.ROOT, 'data_dir': db.DATA_DIR, 'started': STARTED}
+
+
+# ================================================================ 启动密码
+
+@get('/api/lock/status', needs_company=False)
+def api_lock_status(conn, q, token=''):
+    return applock.status(token)
+
+
+@post('/api/lock/unlock', needs_company=False)
+def api_lock_unlock(conn, b, token=''):
+    return applock.unlock(b.get('password') or '')
+
+
+@post('/api/lock/lock', needs_company=False)
+def api_lock_lock(conn, b, token=''):
+    applock.lock_all()
+    return {'ok': True}
+
+
+@post('/api/lock/set', needs_company=False)
+def api_lock_set(conn, b, token=''):
+    return applock.set_password(b.get('password') or '', b.get('old_password') or '', b.get('hint') or '',
+                                b.get('idle_minutes'))
+
+
+@post('/api/lock/options', needs_company=False)
+def api_lock_options(conn, b, token=''):
+    return applock.set_options(b.get('idle_minutes'), b.get('hint'))
+
+
+@post('/api/lock/disable', needs_company=False)
+def api_lock_disable(conn, b, token=''):
+    return applock.disable(b.get('password') or '')
+
+
+@post('/api/lock/recover', needs_company=False)
+def api_lock_recover(conn, b, token=''):
+    return applock.recover(b.get('code') or '', b.get('password') or '')
+
+
+# 锁定时也能用的接口：版本、解锁、心跳、退出
+LOCK_FREE = {'/api/version', '/api/lock/status', '/api/lock/unlock', '/api/lock/recover', '/api/heartbeat',
+             '/api/shutdown'}
+# 不算“有操作”的接口（不会推迟闲置自动锁定）
+NOT_ACTIVITY = {'/api/heartbeat', '/api/lock/status', '/api/update/progress', '/api/update/auto'}
+
+
+# ================================================================ 数据位置、找回旧账套
+
+@get('/api/data/location', needs_company=False)
+def api_data_location(conn, q):
+    r = migrate.data_location()
+    r.update(updater.version_info())
+    return r
+
+
+@post('/api/data/open_folder', needs_company=False)
+def api_data_open_folder(conn, b):
+    which = b.get('which')
+    path = {'data': db.DATA_DIR, 'backup': db.BACKUP_DIR, 'home': db.ROOT}.get(which)
+    if not path:
+        raise AppError('未知的文件夹')
+    return migrate.open_folder(path)
+
+
+@post('/api/data/scan', needs_company=False)
+def api_data_scan(conn, b):
+    return migrate.scan()
+
+
+@post('/api/data/inspect', needs_company=False)
+def api_data_inspect(conn, b):
+    folder = (b.get('folder') or '').strip().strip('"')
+    if not folder:
+        raise AppError('请填写文件夹位置')
+    r = migrate.inspect_folder(folder)
+    if not r:
+        raise AppError('这个文件夹里没有找到账套。请选择旧版软件的文件夹（里面有 data 文件夹），或 data 文件夹本身')
+    return r
+
+
+@post('/api/data/import_folder', needs_company=False)
+def api_data_import_folder(conn, b):
+    return migrate.import_from(b.get('folder') or '', b.get('files') or None, b.get('mode') or 'new')
 
 
 @get('/api/companies/export_all', needs_company=False)
@@ -96,14 +185,6 @@ def api_companies_import(conn, b):
     if not raw:
         raise AppError('请选择要导入的文件')
     return db.import_companies(raw, b.get('filename') or '', b.get('mode') or 'replace', bool(b.get('force')))
-
-
-@post('/api/update', needs_company=False)
-def api_update(conn, b):
-    raw = base64.b64decode(b.get('data') or '')
-    if not raw:
-        raise AppError('请选择新版本的压缩包')
-    return updater.apply_update(raw)
 
 
 @post('/api/update/start', needs_company=False)
@@ -126,9 +207,29 @@ def api_update_progress(conn, q):
     return updater.job_status()
 
 
+@post('/api/update/rollback', needs_company=False)
+def api_update_rollback(conn, b):
+    """退回上一个版本（重启后生效）。"""
+    return updater.start_job('rollback', None)
+
+
+@post('/api/restart', needs_company=False)
+def api_restart(conn, b):
+    """立即重启：关掉现在的后台程序，用启动程序重新打开（会用 versions/current.txt 里的版本）。
+    页面不会关闭，它会等新的后台程序起来后自动刷新。"""
+    if updater.busy():
+        raise AppError('正在更新，请等更新完成后再重启')
+    _state['restart'] = True
+    threading.Timer(0.3, _stop_server).start()
+    return {'ok': True}
+
+
 @get('/api/update/settings', needs_company=False)
 def api_update_settings(conn, q):
-    return {'url': updater.get_update_url(), 'version': VERSION, 'auto_check': updater.get_auto_check()}
+    r = {'url': updater.get_update_url(), 'default_url': updater.UPDATE_URL, 'version': VERSION,
+         'auto_check': updater.get_auto_check()}
+    r.update(updater.version_info())
+    return r
 
 
 @post('/api/update/settings', needs_company=False)
@@ -149,11 +250,6 @@ def api_update_auto(conn, q):
 @post('/api/update/check', needs_company=False)
 def api_update_check(conn, b):
     return updater.check_online(b.get('url') or updater.get_update_url())
-
-
-@post('/api/update/online', needs_company=False)
-def api_update_online(conn, b):
-    return updater.update_online(b.get('url') or updater.get_update_url())
 
 
 @get('/api/company/export')
@@ -209,7 +305,7 @@ def api_meta(conn, q):
         'cf_suggest': prof['cf_suggest'], 'report_lines': R.report_line_options(prof['standard']),
         'standard': prof['standard'], 'standard_name': prof['standard_name'], 'industry': prof['industry'],
         'industry_name': prof['industry_name'], 'features': prof['features'], 'keymap': prof['keymap'],
-        'vehicle_label': prof['vehicle_label'],
+        'vehicle_label': prof['vehicle_label'], 'vat_mode': prof['vat_mode'],
         'has_vouchers': conn.execute('SELECT COUNT(*) FROM vouchers').fetchone()[0] > 0,
     }
 
@@ -234,7 +330,7 @@ def api_logs(conn, q):
 
 @get('/api/vouchers')
 def api_vouchers(conn, q):
-    return V.list_vouchers(conn, P(q, 'from', cast=int), P(q, 'to', cast=int), P(q, 'q', ''),
+    return V.list_vouchers(conn, P(q, 'from'), P(q, 'to'), P(q, 'q', ''),
                            P(q, 'account', ''), P(q, 'status', ''))
 
 
@@ -346,7 +442,7 @@ def api_vehicle_delete(conn, b):
 
 @post('/api/vehicle/purchase_draft')
 def api_vehicle_purchase(conn, b):
-    return VH.purchase_draft(conn, int(b.get('id')), float(b.get('tax_rate', 13)))
+    return VH.purchase_draft(conn, int(b.get('id')), float(b.get('tax_rate', 13)), b.get('mode') or '')
 
 
 @post('/api/vehicle/dispose')
@@ -367,8 +463,7 @@ def api_vehicle_reconcile(conn, q):
 
 @get('/api/vehicle/profit')
 def api_vehicle_profit(conn, q):
-    pf, pt = ledger.normalize_range(conn, P(q, 'from', cast=int), P(q, 'to', cast=int))
-    return VH.vehicle_profit(conn, pf, pt)
+    return VH.vehicle_profit(conn, P(q, 'from'), P(q, 'to'))
 
 
 @get('/api/opening/vehicles')
@@ -389,40 +484,37 @@ def api_opening_vehicles(conn, q):
 
 @get('/api/balance')
 def api_balance(conn, q):
-    return ledger.balance_table(conn, P(q, 'from', cast=int), P(q, 'to', cast=int), P(q, 'level', 9, int),
+    return ledger.balance_table(conn, P(q, 'from'), P(q, 'to'), P(q, 'level', 9, int),
                                 P(q, 'aux', '0') == '1', P(q, 'zero', '0') == '1')
 
 
 @get('/api/gl')
 def api_gl(conn, q):
-    return ledger.general_ledger(conn, P(q, 'code'), P(q, 'from', cast=int), P(q, 'to', cast=int))
+    return ledger.general_ledger(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'))
 
 
 @get('/api/detail')
 def api_detail(conn, q):
-    return ledger.detail_ledger(conn, P(q, 'code'), P(q, 'from', cast=int), P(q, 'to', cast=int), P(q, 'aux'))
+    return ledger.detail_ledger(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'), P(q, 'aux'))
 
 
 @get('/api/auxbal')
 def api_auxbal(conn, q):
-    return ledger.aux_balance(conn, P(q, 'code'), P(q, 'from', cast=int), P(q, 'to', cast=int), P(q, 'zero', '0') == '1')
+    return ledger.aux_balance(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'), P(q, 'zero', '0') == '1')
 
 
 def _report_range(q):
-    """报表期间：from/to（可跨年度）；兼容只传 period 的旧写法。"""
-    p = P(q, 'period', None, int)
-    pf, pt = P(q, 'from', p, int), P(q, 'to', p, int)
-    if not pf or not pt:
-        raise AppError('请选择报表期间')
-    return pf, pt
+    """报表日期：from/to 为起止日期（YYYY-MM-DD，可跨年度）；也兼容期间整数 YYYYMM 和只传 period 的旧写法。"""
+    p = P(q, 'period')
+    d1, d2 = P(q, 'from', p), P(q, 'to', p)
+    if not d1 or not d2:
+        raise AppError('请选择报表日期')
+    return d1, d2
 
 
 @get('/api/report/bs')
 def api_bs(conn, q):
-    pf, pt = _report_range(q)
-    if P(q, 'from') is None:
-        pf = (pt // 100) * 100 + 1
-    return R.balance_sheet(conn, pf, pt)
+    return R.balance_sheet(conn, *_report_range(q))
 
 
 @get('/api/report/is')
@@ -542,6 +634,8 @@ def api_backup_download(conn, q, cid=None):
 
 
 NEEDS_CID = {api_company_export, api_backups, api_backup_now, api_backup_restore, api_backup_download, api_company_delete}
+NEEDS_TOKEN = {api_lock_status, api_lock_unlock, api_lock_lock, api_lock_set, api_lock_options, api_lock_disable,
+               api_lock_recover}
 
 
 # ================================================================ HTTP 处理
@@ -636,12 +730,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {'error': '接口不存在：' + path})
         fn, needs_company = route
         cid = self.headers.get('X-Company') or (arg.get('company', [''])[0] if not is_post else '')
+        token = self.headers.get('X-Unlock') or (arg.get('unlock', [''])[0] if not is_post else '')
+        if path not in LOCK_FREE and not applock.token_valid(token):
+            return self._json(401, {'error': '软件已锁定，请输入启动密码', 'locked': True})
+        if path not in NOT_ACTIVITY:
+            applock.touch(token)
         conn = None
         try:
             if needs_company:
                 conn = db.connect(cid)
             if fn in NEEDS_CID:
                 result = fn(conn, arg, cid=cid)
+            elif fn in NEEDS_TOKEN:
+                result = fn(conn, arg, token=token)
             else:
                 result = fn(conn, arg)
             if conn is not None:
@@ -717,47 +818,111 @@ def _stop_server():
 
 @post('/api/shutdown', needs_company=False)
 def api_shutdown(conn, b):
-    import threading
     threading.Timer(0.3, _stop_server).start()
     return {'ok': True}
 
 
-@post('/api/desktop/show', needs_company=False)
-def api_desktop_show(conn, b):
-    """再次双击软件图标时调用：已经有独立窗口就把它调到最前面。"""
-    return {'window': desktop.show_existing()}
+@post('/api/heartbeat', needs_company=False)
+def api_heartbeat(conn, b):
+    """页面每隔几秒报一次“我还开着”；关闭页面时报 bye。所有页面都关掉后，后台程序自动退出。"""
+    watchdog.beat(str(b.get('id') or ''), bool(b.get('bye')))
+    return {'ok': True, 'version': VERSION, 'started': STARTED}
 
 
-@get('/api/desktop/status', needs_company=False)
-def api_desktop_status(conn, q):
-    return desktop.status()
+class Watchdog:
+    """所有界面窗口都关掉后，自动关闭后台程序（以前关掉浏览器后，后台的 Python 会一直留着）。
+
+    - 页面每 5 秒发一次心跳；关闭/刷新页面时发 bye。
+    - 没有任何页面后再等 GRACE 秒（刷新页面、在页面之间跳转时会马上有新的心跳），还没有就退出。
+    - 页面在后台（最小化）时浏览器会把定时器放慢到最多 1 分钟一次，所以心跳超过 STALE 秒没来才算页面没了。
+    - 打开软件后 FIRST_WAIT 秒内一直没有页面连上（例如浏览器没打开），也退出；再双击图标就会重新打开。
+    - 正在更新时不退出。
+    """
+    STALE = 150
+    GRACE = 10
+    FIRST_WAIT = 300
+
+    def __init__(self):
+        self.pages = {}
+        self.lock = threading.Lock()
+        self.enabled = False
+        self.ever = False
+        self.last_alive = time.time()
+
+    def beat(self, pid, bye=False):
+        with self.lock:
+            now = time.time()
+            if bye:
+                self.pages.pop(pid, None)
+            else:
+                self.pages[pid] = now
+                self.ever = True
+            self.last_alive = now
+
+    def should_exit(self):
+        with self.lock:
+            now = time.time()
+            for k, t in list(self.pages.items()):
+                if now - t > self.STALE:
+                    del self.pages[k]
+            if self.pages:
+                self.last_alive = now
+                return False
+            if not self.enabled or updater.busy():
+                return False
+            if self.ever:
+                return now - self.last_alive > self.GRACE
+            return now - self.last_alive > self.FIRST_WAIT
+
+    def start(self):
+        self.enabled = True
+        self.last_alive = time.time()
+
+        def loop():
+            while _httpd is not None:
+                time.sleep(2)
+                if self.should_exit():
+                    print('所有窗口都已关闭，后台程序自动退出')
+                    _stop_server()
+                    return
+        threading.Thread(target=loop, daemon=True).start()
 
 
-@post('/api/desktop/settings', needs_company=False)
-def api_desktop_settings(conn, b):
-    desktop.set_prefer(b.get('prefer'))
-    return desktop.status()
+watchdog = Watchdog()
+STARTED = time.time()
+_state = {'restart': False}
 
 
-def _show_existing(url):
-    """让已经在运行的软件把窗口调到前面；它没有独立窗口时返回 False。"""
-    import urllib.request
+def _spawn_new_instance():
+    """重启：用启动程序重新打开软件（不再打开新窗口，原来的页面会自动连上）。"""
+    env = dict(os.environ)
+    env['MINGBU_NO_BROWSER'] = '1'
+    exe = paths.launcher()
+    if exe and exe.endswith('.exe'):
+        cmd = [exe]
+    elif exe:
+        cmd = ['/bin/bash', exe]
+    else:
+        cmd = [sys.executable, os.path.join(paths.CODE_DIR, 'start.py')]
+    kw = {'close_fds': True, 'cwd': paths.HOME, 'env': env}
+    if os.name == 'nt':
+        kw['creationflags'] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        kw['start_new_session'] = True
     try:
-        req = urllib.request.Request(url + 'api/desktop/show', data=b'{}', headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=3) as r:
-            return bool(json.loads(r.read().decode('utf-8')).get('window'))
-    except Exception:
-        return False
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+    except OSError as e:
+        print('重启失败：', e)
 
 
 def run(port=8765, open_browser=True):
     global _httpd
     existing = _existing_instance()
     if existing:
-        # 已经在运行：只打开浏览器，不再启动第二份
+        # 已经在运行：只打开窗口，不再启动第二份
         print('软件已经在运行：%s' % existing)
-        if open_browser and not _show_existing(existing):
-            desktop.open_browser(existing)
+        if open_browser:
+            desktop.open_ui(existing)
         return
     db.auto_backup_all()
     httpd = None
@@ -780,18 +945,20 @@ def run(port=8765, open_browser=True):
     print('=' * 56)
     print('  明簿已启动 v%s' % VERSION)
     print('  界面地址：%s' % url)
-    print('  在软件界面右上角点“退出软件”即可关闭。')
+    print('  关掉软件窗口，或点左下角“退出软件”即可关闭。')
     print('=' * 56)
     if open_browser:
-        import threading
-        # 能用独立窗口就开窗口（关掉窗口 = 退出软件），否则用浏览器
-        threading.Timer(0.3, lambda: desktop.open_ui(url, on_closed=_stop_server)).start()
+        threading.Timer(0.3, lambda: desktop.open_ui(url)).start()
+        watchdog.start()  # 只启动后台服务（--no-browser，开发调试用）时不自动退出
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        desktop.stop()
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
         try:
             if os.path.exists(INSTANCE_FILE):
                 with open(INSTANCE_FILE, encoding='utf-8') as f:
@@ -799,3 +966,5 @@ def run(port=8765, open_browser=True):
                         os.remove(INSTANCE_FILE)
         except Exception:
             pass
+        if _state['restart']:
+            _spawn_new_instance()

@@ -1,0 +1,19 @@
+# 自动测试：只在开合并请求、合并到 main、或手动点运行时跑（不在每次推送时跑，减少 GitHub Actions 次数）
+name: 测试
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.8', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -W ignore -m unittest discover -s tests -t . -v
