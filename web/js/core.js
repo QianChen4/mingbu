@@ -571,6 +571,7 @@ function showView(t, pushHist = true) {
   renderTabbar();
   highlightNav(t.name);
   setHash(t.name, t.params);
+  scheduleFit();
   // 别的地方改过数据：按原来的条件重新查询（没保存的凭证除外）
   if (!t.solo && t.ver < App.dataVer && !isDirty(t) && !t.loading) loadIntoTab(t, t.params || {});
 }
@@ -822,6 +823,29 @@ App.start = async () => {
   await navigate(name, params, 'new');
   setTimeout(autoCheckUpdate, 3000); // 等界面先打开，再在后台查新版本
 };
+
+/* ================= 表格高度跟着窗口走 =================
+ * 表格框（.tbl-wrap）自己有滚动条、表头固定。它的高度要正好到窗口底部：以前用固定的“窗口高度 - 180”，
+ * 表格上面的内容多时（标题、查询条件、提示），表格框就超出窗口，看起来像表格跑出了边框，还出现两层滚动条。 */
+function fitTables() {
+  const pane = $('.pane.on');
+  if (!pane) return;
+  const pr = pane.getBoundingClientRect();
+  $$('.tbl-wrap', pane).forEach(w => {
+    if (w.closest('.modal-mask')) return;
+    const top = w.getBoundingClientRect().top - pr.top + pane.scrollTop;
+    const avail = Math.floor(pane.clientHeight - top - 28);
+    w.style.maxHeight = Math.max(260, avail) + 'px';
+  });
+}
+let fitPending = false;
+function scheduleFit() {
+  if (fitPending) return;
+  fitPending = true;
+  requestAnimationFrame(() => { fitPending = false; fitTables(); });
+}
+window.addEventListener('resize', scheduleFit);
+new MutationObserver(scheduleFit).observe(document.getElementById('page') || document.body, { childList: true, subtree: true });
 
 /* ================= 心跳：所有窗口都关掉后，后台程序自动退出 ================= */
 const PAGE_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);

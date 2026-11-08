@@ -341,3 +341,8 @@ td.b { font-weight: 600; }
 .upd-log { background: var(--sum-bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; max-height: 220px; overflow: auto; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; margin: 6px 0 0; }
 .tbl.bal-tbl tr td.name { padding-left: 10px; }
 .lock-card .btn { justify-content: center; text-align: center; }
+/* 左侧菜单的滚动条用深色，不在菜单和内容之间出现一条白边 */
+.side-scroll { scrollbar-width: thin; scrollbar-color: #3a4656 transparent; }
+.side-scroll::-webkit-scrollbar { width: 8px; }
+.side-scroll::-webkit-scrollbar-track { background: transparent; }
+.side-scroll::-webkit-scrollbar-thumb { background: #3a4656; border-radius: 4px; }
