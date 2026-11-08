@@ -269,8 +269,13 @@ pre.fmt { background: #f6f7f9; border: 1px solid var(--line); border-radius: 5px
   body:not(.printing) #app { height: auto; display: block; }
   .tbl-wrap { overflow: visible !important; max-height: none !important; }
   .tbl th { position: static; }
-  .tbl th, .tbl td { border-color: #777 !important; padding: 4px 6px; font-size: 12px; height: auto; }
-  table.tbl { border-color: #777 !important; }
+  /* 打印时表格线统一用黑色实线、合并边框，每个格子四边都画，缩放后也不会有线被打印机丢掉 */
+  table.tbl { border-collapse: collapse !important; border: 1px solid #000 !important; }
+  .tbl th, .tbl td { border: 1px solid #000 !important; padding: 4px 6px; font-size: 12px; height: auto;
+    background: none !important; color: #000 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .tbl a { color: #000 !important; text-decoration: none; }
+  .tbl thead { display: table-header-group; }
+  .tbl tr { break-inside: avoid; page-break-inside: avoid; }
   .tbl tbody tr:hover td { background: none; }
   .pv-page { page-break-after: always; break-after: page; }
   .pv-page:last-child { page-break-after: auto; break-after: auto; }
@@ -319,7 +324,7 @@ td.b { font-weight: 600; }
   .bs-table col.bs-name { width: 19%; }
   .bs-table col.bs-no { width: 7mm; }
   .bs-table td.n, .bs-table th.n { font-size: calc(9.5px * var(--pscale, 1)) !important; padding-left: 2px !important; padding-right: 3px !important; }
-  .bs-table td.bs-right, .bs-table th.bs-right { border-left: 2px solid #555 !important; }
+  .bs-table td.bs-right, .bs-table th.bs-right { border-left: 2px solid #000 !important; }
 }
 
 /* 软件更新进度 */
