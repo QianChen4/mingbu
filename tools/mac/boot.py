@@ -1,65 +1,95 @@
-"""明簿.app 的启动程序（Mac 测试版）：确定要运行的版本，然后运行它的 start.py。
+"""明簿.app 的启动程序（Mac 测试版）。
 
-1. .app 里带的程序（Resources/program/v版本号）比软件文件夹里的新，就复制过去并设为当前版本
-   （第一次打开、或者换了新的 .app 时）；
-2. 读 versions/current.txt，运行那个版本的 start.py（用 .app 里带的 Python）。
+软件文件夹就是 明簿.app 所在的文件夹：读 versions/current.txt，用 .app 里带的 Python 运行那个版本的 start.py。
+账套数据在软件文件夹的 data 里，不放到别的地方。
+
+从“下载”里直接双击没签名的 .app 时，macOS 会把它临时复制到一个随机位置运行（App Translocation），
+这时用系统接口（SecTranslocateCreateOriginalPathForURL）找回 .app 原来所在的文件夹。
 """
 import os
 import re
-import shutil
+import subprocess
 import sys
 
-RES = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != '--detach' else os.path.dirname(os.path.abspath(__file__))
-HOME = os.environ['MINGBU_HOME']
-VERSIONS = os.path.join(HOME, 'versions')
-CURRENT = os.path.join(VERSIONS, 'current.txt')
+APP = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))  # …/明簿.app
+
+
+def original_app_path(app):
+    """被系统临时挪走时，找回 .app 原来的位置；没被挪走就原样返回；找不回返回 None。"""
+    if '/AppTranslocation/' not in app:
+        return app
+    try:
+        import ctypes
+        import ctypes.util
+        cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library('CoreFoundation'))
+        sec = ctypes.cdll.LoadLibrary(ctypes.util.find_library('Security'))
+        cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+        cf.CFURLCreateFromFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long,
+                                                               ctypes.c_bool]
+        cf.CFURLGetFileSystemRepresentation.restype = ctypes.c_bool
+        cf.CFURLGetFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_char_p, ctypes.c_long]
+        sec.SecTranslocateCreateOriginalPathForURL.restype = ctypes.c_void_p
+        sec.SecTranslocateCreateOriginalPathForURL.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        raw = app.encode('utf-8')
+        url = cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), True)
+        orig = sec.SecTranslocateCreateOriginalPathForURL(url, None)
+        if orig:
+            buf = ctypes.create_string_buffer(4096)
+            if cf.CFURLGetFileSystemRepresentation(orig, True, buf, 4096):
+                return buf.value.decode('utf-8')
+    except Exception:
+        pass
+    return None
+
+
+def alert(msg):
+    try:
+        subprocess.run(['osascript', '-e', 'display dialog "%s" with title "明簿" buttons {"好"} with icon stop'
+                        % msg.replace('"', "'")], timeout=300)
+    except Exception:
+        pass
 
 
 def vtuple(v):
     return tuple(int(x) for x in re.findall(r'\d+', v or '0')[:4])
 
 
-def current():
+def current(versions):
     try:
-        with open(CURRENT, encoding='utf-8-sig') as f:
+        with open(os.path.join(versions, 'current.txt'), encoding='utf-8-sig') as f:
             v = f.read().strip()
-        if re.fullmatch(r'v[\w.\-]+', v) and os.path.isfile(os.path.join(VERSIONS, v, 'start.py')):
+        if re.fullmatch(r'v[\w.\-]+', v) and os.path.isfile(os.path.join(versions, v, 'start.py')):
             return v
     except OSError:
         pass
-    return ''
-
-
-def write_current(v):
-    tmp = CURRENT + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(v + '\n')
-    os.replace(tmp, CURRENT)
+    # current.txt 不对时，用编号最大的版本
+    try:
+        vs = [n for n in os.listdir(versions) if re.fullmatch(r'v\d[\w.\-]*', n)
+              and os.path.isfile(os.path.join(versions, n, 'start.py'))]
+    except OSError:
+        vs = []
+    return max(vs, key=vtuple) if vs else ''
 
 
 def main():
-    os.makedirs(VERSIONS, exist_ok=True)
-    prog = os.path.join(RES, 'program')
-    bundled = sorted((n for n in os.listdir(prog) if n.startswith('v')), key=vtuple)[-1:] if os.path.isdir(prog) else []
-    cur = current()
-    if bundled:
-        b = bundled[0]
-        if not cur or vtuple(b) > vtuple(cur):
-            dest = os.path.join(VERSIONS, b)
-            if not os.path.isfile(os.path.join(dest, 'start.py')):
-                tmp = dest + '.part'
-                shutil.rmtree(tmp, ignore_errors=True)
-                shutil.copytree(os.path.join(prog, b), tmp)
-                shutil.rmtree(dest, ignore_errors=True)
-                os.rename(tmp, dest)
-            write_current(b)
-            cur = b
+    app = original_app_path(APP)
+    if not app:
+        alert('打不开：找不到软件文件夹。请把整个“明簿”文件夹移到“文稿”等位置，再双击里面的“明簿.app”。')
+        return
+    home = os.path.dirname(app)
+    versions = os.path.join(home, 'versions')
+    cur = current(versions)
     if not cur:
-        raise SystemExit('找不到程序文件，请重新下载明簿.app')
-    code = os.path.join(VERSIONS, cur)
+        alert('找不到程序文件（versions 文件夹）。请把完整的压缩包重新解压，然后双击里面的“明簿.app”。')
+        return
+    os.environ['MINGBU_HOME'] = home
+    os.makedirs(os.path.join(home, 'data'), exist_ok=True)
+    log = open(os.path.join(home, 'data', '运行日志.txt'), 'a', encoding='utf-8', buffering=1)
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+    code = os.path.join(versions, cur)
     os.chdir(code)
     # 让 .app 自己马上结束，后台程序脱离出去单独运行。
-    # 否则 .app 会一直显示为“正在运行”，再次双击时 macOS 可能报“无法打开 -47”，也打不开新窗口。
     if '--detach' in sys.argv and hasattr(os, 'fork'):
         if os.fork() > 0:
             os._exit(0)

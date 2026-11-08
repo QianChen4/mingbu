@@ -12,8 +12,8 @@
       data/                     ← 账套数据（更新时不动）
       backups/                  ← 备份
 
-Mac 版的软件文件夹是 ~/Library/Application Support/财务记账软件（老版本就在这里，故意不改名），
-由“明簿.app”里的启动脚本通过环境变量 MINGBU_HOME 告诉程序。
+Mac 测试版也是一个文件夹（里面是 明簿.app、versions、data），软件文件夹就是 明簿.app 所在的文件夹，
+由 明簿.app 里的启动程序通过环境变量 MINGBU_HOME 告诉程序。数据不再放到 ~/Library/Application Support。
 
 开发时直接运行仓库里的 start.py（没有 versions 文件夹），软件文件夹就是代码所在的文件夹，和老版本一样。
 """

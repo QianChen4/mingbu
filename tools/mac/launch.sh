@@ -1,18 +1,16 @@
 #!/bin/bash
 # 明簿.app 的启动脚本（Mac 测试版）。
-# 程序和数据都放在 ~/Library/Application Support/财务记账软件（老版本就在这里，故意不改名）：
-#   versions/current.txt、versions/v1.8.0/…、data/、backups/
-# .app 里带了 Python（Apple 芯片和 Intel 各一份）和打包时的程序；boot.py 负责把程序放进上面的文件夹并运行。
-# 在线更新只往 versions 里装新版本，不改 .app，所以更新后 .app 不用换。
-HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
+# Mac 版和 Windows 版一样是一个文件夹，程序和数据都在这个文件夹里：
+#   明簿/明簿.app            ← 只负责启动（带 Python），更新时不换
+#   明簿/versions/v1.8.0/    ← 程序（网页和 Python 代码），更新时只换这里
+#   明簿/data/、backups/      ← 账套数据和备份
+# boot.py 找到软件文件夹后运行程序。
+RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
 case "$(uname -m)" in
-  arm64) PY="$HERE/python-arm64/bin/python3" ;;
-  *)     PY="$HERE/python-x86_64/bin/python3" ;;
+  arm64) PY="$RES/python-arm64/bin/python3" ;;
+  *)     PY="$RES/python-x86_64/bin/python3" ;;
 esac
-export MINGBU_HOME="$HOME/Library/Application Support/财务记账软件"
 export MINGBU_LAUNCHER="$0"
-mkdir -p "$MINGBU_HOME/data"
-# boot.py 会把后台程序分离出去，然后这个 .app 马上结束（不会一直挂着“正在运行”）。
-# 再次双击时，新启动的程序发现后台已经在运行，就只打开一个新窗口。
-"$PY" -I "$HERE/boot.py" "$HERE" --detach < /dev/null >> "$MINGBU_HOME/data/运行日志.txt" 2>&1
+# boot.py 会把后台程序分离出去，然后这个 .app 马上结束（不会一直挂着“正在运行”，避免“无法打开 -47”）。
+"$PY" -I "$RES/boot.py" --detach < /dev/null > /dev/null 2>&1
 exit 0

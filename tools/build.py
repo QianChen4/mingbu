@@ -6,7 +6,7 @@
 
 输出在 dist/：
   caiwu-jizhang-windows.zip   Windows 7 / 10 / 11 通用。新装和离线更新都用这一个文件
-  caiwu-jizhang-mac.zip       Mac 测试用，解压出“明簿.app”
+  caiwu-jizhang-mac.zip       Mac 测试用，解压出“明簿”文件夹（里面有 明簿.app，数据也放在这个文件夹里）
   latest.json                 在线更新信息（顶层 url/sha256 是 Windows 包，"mac" 里是 Mac 包）
 
 Windows 包的结构（解压后整个文件夹拷到哪里都能用）：
@@ -183,21 +183,23 @@ def fetch_python(arch):
 
 
 def build_mac(version):
+    """Mac 测试版：和 Windows 版一样是一个文件夹，数据就放在这个文件夹里。
+    明簿/明簿.app（启动程序 + Python，两种芯片各一份）、明簿/versions/v版本号/（程序）、明簿/data（第一次打开时建）。"""
     vname = 'v' + version
     path = os.path.join(DIST, MAC_ZIP)
     z = Zip(path)
-    app = '明簿.app/Contents/'
+    top = TOP + '/'
+    app = top + '明簿.app/Contents/'
     plist = {
         'CFBundleName': '明簿', 'CFBundleDisplayName': '明簿', 'CFBundleExecutable': 'mingbu',
-        'CFBundleIdentifier': 'local.caiwu.jizhang', 'CFBundleIconFile': 'app.icns',
-        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version, 'CFBundleVersion': version,
+        'CFBundleIdentifier': 'local.mingbu.folder', 'CFBundleIconFile': 'app.icns',
+        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '2.0', 'CFBundleVersion': '2.0',
         'LSMinimumSystemVersion': '10.13', 'LSUIElement': True, 'NSHighResolutionCapable': True,
     }
     z.add_bytes(app + 'Info.plist', plist_xml(plist))
     z.add_file(app + 'MacOS/mingbu', os.path.join(TOOLS, 'mac', 'launch.sh'), 0o755)
     z.add_file(app + 'Resources/boot.py', os.path.join(TOOLS, 'mac', 'boot.py'), 0o644)
     z.add_file(app + 'Resources/app.icns', os.path.join(ROOT, 'assets', 'app.icns'), 0o644)
-    add_program(z, app + 'Resources/program/' + vname + '/', version)
     for arch in ('arm64', 'x86_64'):
         tgz = fetch_python(arch)
         with tarfile.open(tgz) as t:
@@ -210,9 +212,11 @@ def build_mac(version):
                     z.add_link(name, m.linkname)
                 elif m.isfile():
                     z.add_bytes(name, t.extractfile(m).read(), m.mode & 0o777)
+    z.add_bytes(top + 'versions/current.txt', (vname + '\n').encode())
+    add_program(z, top + 'versions/' + vname + '/', version)
     for d in DOCS:
         if os.path.isfile(os.path.join(ROOT, d)):
-            z.add_file(d, os.path.join(ROOT, d), 0o644)
+            z.add_file(top + d, os.path.join(ROOT, d), 0o644)
     z.close()
     return path
 
