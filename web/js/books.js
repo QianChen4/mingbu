@@ -15,6 +15,14 @@ function bindPE(page, onExport) {
   $('[data-act=export]', page).onclick = () => onExport();
 }
 const ACCT_HISTORY_KEY = 'lastAcct';
+const LEVEL_NAMES = ['一', '二', '三', '四', '五', '六'];
+/** 级次下拉：按账套里实际有几级科目列出“一级、二级、三级……”和“全部” */
+function levelOptions() {
+  const max = Math.max(1, ...App.meta.accounts.map(a => a.level || 1));
+  let h = '';
+  for (let i = 1; i <= max; i++) h += `<option value="${i}">${i <= LEVEL_NAMES.length ? LEVEL_NAMES[i - 1] : i}级</option>`;
+  return h + '<option value="9" selected>全部</option>';
+}
 
 /* ================= 科目余额表 ================= */
 App.pages.balance = async (page, params) => {
@@ -22,7 +30,7 @@ App.pages.balance = async (page, params) => {
   const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
   page.innerHTML = pageHead('科目余额表', '各科目的期初余额、本期发生额、本年累计和期末余额') + `
     <div class="toolbar" id="flt">${rangeControls(pf, pt)}
-      <label>级次 <select name="level"><option value="1">一级</option><option value="2">二级</option><option value="9" selected>全部</option></select></label>
+      <label>级次 <select name="level">${levelOptions()}</select></label>
       <label class="check"><input type="checkbox" name="aux"> 显示辅助核算明细</label>
       <label class="check"><input type="checkbox" name="zero"> 显示无数据的科目</label>
       <button class="btn primary" id="search">查询</button>${printExportButtons()}</div>
