@@ -531,6 +531,7 @@ function renderTabbar() {
       ${isDirty(t) ? '<span class="tab-dirty" title="有没保存的内容">●</span>' : ''}<span class="tab-title">${esc(tabTitle(t))}</span>
       ${t === App.activeTab ? '<button class="tab-btn" data-act="reload" title="刷新这个标签（重新读取最新数据）">↻</button>' : ''}
       <button class="tab-btn" data-act="close" title="关闭">×</button></div>`).join('');
+  layoutTabs(bar);
   const on = $('.tab.on', bar);
   if (on) {  // 当前标签不在可见范围时，把标签栏滚动过去
     const l = on.offsetLeft, r = l + on.offsetWidth;
@@ -542,13 +543,46 @@ function renderTabbar() {
     el.addEventListener('mousedown', e => { if (e.button === 1) { e.preventDefault(); closeTab(t); } });
     el.onclick = e => {
       const act = e.target.dataset && e.target.dataset.act;
-      if (act === 'close') return closeTab(t);
+      if (act === 'close') {
+        // 像浏览器一样：连续点 × 关标签时，标签宽度先不变，下一个标签的 × 正好移到鼠标下面
+        App.tabFreeze = App.tabWidth || null;
+        return closeTab(t);
+      }
       if (act === 'reload') return reloadTab(t);
       showView(t);
     };
   });
+  if (!bar.dataset.leaveBound) {
+    bar.dataset.leaveBound = '1';
+    // 鼠标离开标签栏后，再按剩下的标签重新分配宽度
+    bar.addEventListener('mouseleave', () => { if (App.tabFreeze) { App.tabFreeze = null; layoutTabs(bar); } });
+  }
   renderBack();
 }
+/* 标签宽度：所有标签一样宽。空间够时按最长的标签文字定宽度（最宽 200），标签多了就平均分，最窄 96，再多就左右滚动。
+ * 刚点过 × 、鼠标还在标签栏上时，宽度保持不变。 */
+const TAB_MIN = 96, TAB_MAX = 200, TAB_GAP = 3;
+let tabMeasure = null;
+function tabTextWidth(text, bold) {
+  tabMeasure = tabMeasure || document.createElement('canvas').getContext('2d');
+  const font = getComputedStyle(document.body).fontFamily;
+  tabMeasure.font = `${bold ? 600 : 400} 13px ${font}`;
+  return tabMeasure.measureText(text).width;
+}
+function layoutTabs(bar) {
+  bar = bar || $('#tabbar');
+  if (!bar || !App.tabs.length) return;
+  let w = App.tabFreeze;
+  if (!w) {
+    // 文字 + 左右留白 + ●/↻/× 按钮的位置
+    const need = Math.max(...App.tabs.map(t => tabTextWidth(tabTitle(t), true))) + 12 + 6 + 20 + 20 + 14 + 8;
+    const avail = (bar.clientWidth - 24) / App.tabs.length - TAB_GAP;
+    w = Math.floor(Math.max(TAB_MIN, Math.min(TAB_MAX, need, avail)));
+  }
+  App.tabWidth = w;
+  $$('.tab', bar).forEach(el => { el.style.width = w + 'px'; });
+}
+window.addEventListener('resize', () => { if (!App.tabFreeze) layoutTabs(); });
 // 有没保存的内容时，标签上显示 ●
 setInterval(() => {
   const sig = App.tabs.map(t => t.id + (isDirty(t) ? '*' : '')).join(',');
