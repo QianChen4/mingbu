@@ -14,7 +14,23 @@ function bindPE(page, onExport) {
   $('[data-act=print]', page).onclick = () => printReport();
   $('[data-act=export]', page).onclick = () => onExport();
 }
-const ACCT_HISTORY_KEY = 'lastAcct';
+/** “无发生额的月份不显示”：去掉借贷都没有发生、也没有凭证的月份的“本月合计”和后面的“本年累计” */
+function hideEmptyMonths(rows) {
+  const out = [];
+  let lines = 0, skipYtd = false;
+  for (const r of rows) {
+    if (r.type === 'line') { lines++; out.push(r); continue; }
+    if (r.type === 'month') {
+      skipYtd = !lines && !r.debit && !r.credit;
+      lines = 0;
+      if (!skipYtd) out.push(r);
+      continue;
+    }
+    if (r.type === 'ytd') { if (!skipYtd) out.push(r); skipYtd = false; continue; }
+    out.push(r);
+  }
+  return out;
+}
 const LEVEL_NAMES = ['一', '二', '三', '四', '五', '六'];
 /** 级次下拉：按账套里实际有几级科目列出“一级、二级、三级……”和“全部” */
 function levelOptions() {
@@ -78,6 +94,7 @@ App.pages.gl = async (page, params) => {
   page.innerHTML = pageHead('总账', '按月列示科目的本月合计、本年累计和余额') + `
     <div class="toolbar" id="flt"><label>科目 <input type="text" name="acct" style="width:240px"></label>${rangeControls(pf, pt)}
       <label class="check"><input type="checkbox" name="all1"> 全部一级科目</label>
+      <label class="check"><input type="checkbox" name="hide"${+params.hide === 1 ? ' checked' : ''}> 无发生额的月份不显示</label>
       <button class="btn primary" id="search">查询</button>${printExportButtons()}</div><div id="out"></div>`;
   const acc = $('[name=acct]', page);
   attachPicker(acc, { source: () => acctItems(false) });
@@ -85,14 +102,15 @@ App.pages.gl = async (page, params) => {
   let results = [];
   const load = async () => {
     const [a, b] = readRange(page);
-    const all1 = $('[name=all1]', page).checked;
-    remember(page, { code: acc.dataset.value || '', from: a, to: b });
+    const all1 = $('[name=all1]', page).checked, hide = $('[name=hide]', page).checked;
+    remember(page, Object.assign({ code: acc.dataset.value || '', from: a, to: b }, hide ? { hide: 1 } : {}));
     const codes = all1 ? App.meta.accounts.filter(x => x.level === 1).map(x => x.code) : [acc.dataset.value];
     if (!codes[0]) return toast('请选择科目', 'err');
     results = [];
     for (const c of codes) {
       const d = await api('/api/gl?' + qs({ code: c, from: a, to: b }));
       if (all1 && d.rows.every(r => !r.debit && !r.credit && !r.balance)) continue;
+      if (hide) d.rows = hideEmptyMonths(d.rows);
       results.push(d);
     }
     $('#out', page).innerHTML = results.map(d => `
@@ -121,11 +139,12 @@ App.pages.gl = async (page, params) => {
 App.pages.detail = async (page, params) => {
   const [dpf, dpt] = defaultRange();
   const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
-  const code = params.code || store(ACCT_HISTORY_KEY) || '1002';
+  const code = params.code || '1002';
   page.innerHTML = pageHead('明细账', '科目的逐笔发生额与滚动余额，可以查某一天或任意一段时间；点击凭证号可打开原凭证') + `
     <div class="toolbar" id="flt"><label>科目 <input type="text" name="acct" style="width:240px"></label>
       <label>辅助项 <input type="text" name="aux" style="width:170px" placeholder="全部"></label>
       ${rangeControls(pf, pt)}
+      <label class="check"><input type="checkbox" name="hide"${+params.hide === 1 ? ' checked' : ''}> 无发生额的月份不显示</label>
       <button class="btn" id="prev-acct" title="上一个科目">‹</button><button class="btn" id="next-acct" title="下一个科目">›</button>
       <button class="btn primary" id="search">查询</button>${printExportButtons()}</div><div id="out"></div>`;
   const acc = $('[name=acct]', page), aux = $('[name=aux]', page);
@@ -139,9 +158,10 @@ App.pages.detail = async (page, params) => {
   const load = async () => {
     if (!acc.dataset.value) return toast('请选择科目', 'err');
     const [a, b] = readRange(page);
-    store(ACCT_HISTORY_KEY, acc.dataset.value);
-    remember(page, { code: acc.dataset.value, aux: aux.dataset.value || '', from: a, to: b });
+    const hide = $('[name=hide]', page).checked;
+    remember(page, Object.assign({ code: acc.dataset.value, aux: aux.dataset.value || '', from: a, to: b }, hide ? { hide: 1 } : {}));
     data = await api('/api/detail?' + qs({ code: acc.dataset.value, from: a, to: b, aux: aux.dataset.value || '' }));
+    if (hide) data.rows = hideEmptyMonths(data.rows);
     const ac = data.account;
     const showAcct = !ac.is_leaf, showAux = !!ac.aux_type && !aux.dataset.value;
     $('#out', page).innerHTML = `${reportTitle('明 细 账', data.label,
