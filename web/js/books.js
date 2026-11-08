@@ -83,7 +83,7 @@ App.pages.balance = async (page, params) => {
     exportXlsx('科目余额表', [{ name: '科目编码', width: 12 }, { name: '科目名称', width: 34 }, { name: '方向', width: 6 }, M('期初余额'), M('本期借方发生'), M('本期贷方发生'),
       M('累计借方发生'), M('累计贷方发生'), { name: '方向', width: 6 }, M('期末余额')], rows, data.label);
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };
 
 /* ================= 总账 ================= */
@@ -132,7 +132,7 @@ App.pages.gl = async (page, params) => {
     exportXlsx('总账', [{ name: '期间', width: 14 }, { name: '摘要', width: 18 }, { name: '借方', type: 'money' }, { name: '贷方', type: 'money' },
       { name: '方向', width: 6 }, { name: '余额', type: 'money' }], rows, rangeLabel(results[0].from, results[0].to));
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };
 
 /* ================= 明细账 ================= */
@@ -194,7 +194,7 @@ App.pages.detail = async (page, params) => {
       { name: '辅助核算', width: 18 }, { name: '借方', type: 'money' }, { name: '贷方', type: 'money' }, { name: '方向', width: 6 }, { name: '余额', type: 'money' }],
       rows, `${data.account.code} ${data.account.full_name}　${data.label}`);
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };
 
 /* ================= 辅助核算余额表 ================= */
@@ -237,5 +237,5 @@ App.pages.auxbal = async (page, params) => {
       M('本期借方发生'), M('本期贷方发生'), M('本年累计借方'), M('本年累计贷方'), { name: '方向', width: 6 }, M('期末余额')],
       rows, `${data.account.code} ${data.account.full_name}　${data.label}`);
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };

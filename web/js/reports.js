@@ -56,7 +56,7 @@ App.pages.bs = async (page, params) => {
       { name: data.end_label, type: 'money', width: 20 }, { name: '负债和所有者权益（或股东权益）', width: 30 }, { name: '行次', type: 'number', width: 6 },
       { name: data.begin_label, type: 'money', width: 20 }, { name: data.end_label, type: 'money', width: 20 }], rows, data.label + '　' + data.form_no);
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };
 
 /** 行次：附注行（如“其中：固定资产原价”“减：累计折旧”）只列示构成，不编行次 */
@@ -123,7 +123,7 @@ App.pages.is = async (page, params) => {
     });
     exportXlsx('利润表', cols, rows, data.label);
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };
 
 /* ================= 现金流量表 ================= */
@@ -160,7 +160,7 @@ App.pages.cf = async (page, params) => {
     exportXlsx('现金流量表', [{ name: '项目', width: 50 }, { name: '本期金额', type: 'money', width: 18 },
       { name: `本年累计金额（${data.year}年）`, type: 'money', width: 22 }], rows, data.label);
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };
 
 /* ================= 单车盈利分析 ================= */
@@ -206,5 +206,5 @@ App.pages.vprofit = async (page, params) => {
     exportXlsx('单车盈利分析', [{ name: '车牌号', width: 22 }, { name: '车型' }, { name: '状态' }, M('收入'), M('折旧'), M('保险'), M('维修保养'), M('其他成本'), M('毛利')],
       rows, data.label);
   });
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };

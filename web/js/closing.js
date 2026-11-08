@@ -52,7 +52,7 @@ App.pages.closing = async (page) => {
       <div class="toolbar" style="margin-top:14px">
         <button class="btn primary" id="do-close" ${failed.length ? 'disabled' : ''}>结账（${plabel(p)}）</button>
         ${st.last_closed ? `<button class="btn danger" id="do-reopen">反结账（${plabel(st.last_closed)}）</button>` : ''}
-        <a class="btn" href="#/balance">查看科目余额表</a><a class="btn" href="#/bs">查看报表</a>
+        <a class="btn" href="#/balance?run=1">查看科目余额表</a><a class="btn" href="#/bs?run=1">查看报表</a>
       </div>
       <p class="hint">结账后本月凭证不能再修改；发现错误时可以“反结账”，每次只能退回最近结账的一个月。</p>
     </div>`;

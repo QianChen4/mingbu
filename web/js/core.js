@@ -441,6 +441,14 @@ document.addEventListener('change', e => {
   toast('起始日期不能晚于结束日期，已自动调整');
 });
 /** 默认查询区间：当前会计期间所在年度 1 月 1 日（启用年度从启用日）到当前会计期间的最后一天 */
+/** 点左侧菜单新开的标签没有查询条件：只显示默认条件，不自动查询，点“查询”才出结果 */
+function isQueried(params) { return Object.keys(params || {}).length > 0; }
+function notQueried(page) {
+  const msg = '设置好条件后点“查询”。';
+  const out = $('#out', page), list = $('#list', page);
+  if (out) out.innerHTML = `<div class="empty">${msg}</div>`;
+  else if (list) list.innerHTML = `<tr><td colspan="20" class="empty">${msg}</td></tr>`;
+}
 function defaultRange() {
   const cur = App.meta.current_period;
   const y1 = `${Math.floor(cur / 100)}-01-01`;
@@ -1144,7 +1152,7 @@ App.pages.home = async (page) => {
         <li class="${h.voucher_count && !h.unaudited ? 'ok' : ''}"><span class="t">审核凭证</span><span class="d">逐张核对后审核；审核后的凭证不能修改。</span><a class="btn small" href="#/vouchers?status=unaudited">去审核</a></li>
         ${hasFeature('vehicles') ? `<li class="${stepOk('计提车辆折旧') ? 'ok' : ''}"><span class="t">计提折旧</span><span class="d">系统按车辆台账自动计算，生成一张折旧凭证。</span><a class="btn small" href="#/closing">期末处理</a></li>` : ''}
         <li class="${stepOk('结转损益') && h.voucher_count ? 'ok' : ''}"><span class="t">结转损益</span><span class="d">把收入和费用转入“本年利润”，自动生成凭证。</span><a class="btn small" href="#/closing">期末处理</a></li>
-        <li><span class="t">查看账表</span><span class="d">科目余额表 → 资产负债表、利润表、现金流量表。</span><a class="btn small" href="#/balance">余额表</a><a class="btn small" href="#/bs">报表</a></li>
+        <li><span class="t">查看账表</span><span class="d">科目余额表 → 资产负债表、利润表、现金流量表。</span><a class="btn small" href="#/balance?run=1">余额表</a><a class="btn small" href="#/bs?run=1">报表</a></li>
         <li><span class="t">结账</span><span class="d">检查全部通过后结账，进入下个月。</span><a class="btn small" href="#/closing">去结账</a></li>
       </ol>
     </div>

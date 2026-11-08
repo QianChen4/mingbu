@@ -508,5 +508,5 @@ App.pages.vouchers = async (page, params) => {
     if (!await confirmBox(`把 ${plabel(per)} 的凭证按日期重新从 1 号开始连续编号？`, '整理')) return;
     try { const r = await api('/api/voucher/renumber', { period: per }); toast(`已整理 ${r.count} 张`, 'ok'); load(); } catch (e) { toast(e.message, 'err'); }
   };
-  await load();
+  if (isQueried(params)) await load(); else notQueried(page);
 };
