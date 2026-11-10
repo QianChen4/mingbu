@@ -1146,6 +1146,7 @@ App.pages.home = async (page) => {
       ${hasFeature('vehicles') ? `<div class="stat"><div class="k">在用车辆</div><div class="v">${h.vehicle_in_use} 辆</div></div>
       <div class="stat"><div class="k">本月应提折旧</div><div class="v">${fmtN(st.depreciation.amount)}</div></div>` : ''}
     </div>
+    ${h.export_reminder && h.export_reminder.remind ? `<div class="notice warn">${h.export_reminder.days === null ? '还没有把账套备份到这台电脑以外的地方。' : `已经 ${h.export_reminder.days} 天没有把账套备份到这台电脑以外的地方了。`}备份和账套在同一块硬盘上，电脑坏了会一起丢。请到 <a href="#/backup">备份与恢复</a> 下载账套文件，存到 U 盘或网盘。</div>` : ''}
     <div class="card"><h2>本月操作流程</h2>
       <ol class="steps">
         <li class="${h.voucher_count ? 'ok' : ''}"><span class="t">录入凭证</span><span class="d">日常业务按天汇总录入，常用业务可以用凭证模板。</span><a class="btn small" href="#/voucher">新增凭证</a></li>

@@ -249,7 +249,7 @@ def balance_sheet(conn, d1, d2=None):
     if d2 is None:
         d2 = d1
         d1 = str(d1)[:4] + '-01-01' if '-' in str(d1) else (int(d1) // 100) * 100 + 1
-    d1, d2, _raw = date_range(conn, d1, d2)
+    d1, d2, raw_d1 = date_range(conn, d1, d2)
     fmt, keymap = _fmt(conn)
     accts = account_map(conn)
     # (key, name, side, group, terms, hide0) —— 把关键字换成科目编码，找不到的取数项忽略
@@ -303,7 +303,11 @@ def balance_sheet(conn, d1, d2=None):
         return vals
 
     end_vals = evaluate(balances_through(conn, d2, accts))
-    begin_vals = evaluate(balances_before(conn, d1, accts))
+    sd = start_date(conn)
+    # 账套年中启用、查询又是从启用年度的 1 月 1 日（或更早）开始：第一栏取期初里录入的“年初余额”，
+    # 而不是启用时的余额
+    from_year_begin = raw_d1 <= sd[:4] + '-01-01'
+    begin_vals = evaluate(balances_before(conn, sd[:4] + '-01-01' if from_year_begin else d1, accts))
     rows = []
     for key, name, side, group, terms, hide0, memo in items:
         if hide0 and not end_vals[key] and not begin_vals[key]:
@@ -319,8 +323,7 @@ def balance_sheet(conn, d1, d2=None):
         'end_diff': end_vals['assets'] - end_vals['le_total'],
         'begin_diff': begin_vals['assets'] - begin_vals['le_total'],
     }
-    sd = start_date(conn)
-    if d1[5:] == '01-01' or d1 <= sd[:4] + '-01-01':
+    if d1[5:] == '01-01' or from_year_begin:
         begin_label = '年初余额'
     else:
         begin_label = '期初余额'

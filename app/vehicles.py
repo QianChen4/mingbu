@@ -8,7 +8,7 @@
 """
 from .db import AppError, log, acct_key, company_profile
 from .ledger import (account_map, check_open, current_period, leaf_end_balances, period_of_date, plabel,
-                     start_period, last_day)
+                     start_period, last_day, _norm_date)
 from .vouchers import to_cents
 
 
@@ -72,8 +72,7 @@ def save_vehicle(conn, data):
     if not plate:
         raise AppError('请填写车牌号')
     model = (data.get('model') or '').strip()
-    pdate = (data.get('purchase_date') or '').strip()
-    period_of_date(pdate)
+    pdate = _norm_date((data.get('purchase_date') or '').strip())
     original = to_cents(data.get('original'))
     if original <= 0:
         raise AppError('请填写车辆原值（不含税购置成本）')
@@ -162,15 +161,29 @@ def purchase_draft(conn, vid, tax_rate=13, mode=''):
     return {'date': v['purchase_date'], 'note': ''.join(notes), 'mode': mode, 'lines': lines}
 
 
+def mark_disposed(conn, vid, period):
+    """处置凭证保存成功后调用：把车辆标记为“已处置”。"""
+    v = conn.execute('SELECT * FROM vehicles WHERE id = ?', (vid,)).fetchone()
+    if not v:
+        raise AppError('车辆不存在')
+    if v['status'] != '在用':
+        raise AppError('车辆 %s 已经处置过了' % v['plate'])
+    if period_of_date(v['purchase_date']) > period:
+        raise AppError('处置日期早于购置日期')
+    conn.execute('UPDATE vehicles SET status = ?, dispose_period = ? WHERE id = ?', ('已处置', period, vid))
+    log(conn, '处置车辆', '%s %s' % (v['plate'], plabel(period)))
+
+
 def dispose(conn, data):
-    """把车辆标记为已处置，并返回处置凭证草稿（在凭证界面确认后保存）。"""
+    """返回车辆处置凭证的草稿。车辆要等这张凭证保存成功后才标记为“已处置”（见 mark_disposed），
+    草稿没保存就关掉的话，车辆还是“在用”。"""
     vid = int(data.get('id'))
     v = conn.execute('SELECT * FROM vehicles WHERE id = ?', (vid,)).fetchone()
     if not v:
         raise AppError('车辆不存在')
     if v['status'] != '在用':
         raise AppError('该车辆已经处置过了')
-    date = data.get('date') or ''
+    date = _norm_date(data.get('date') or '')
     p = period_of_date(date)
     check_open(conn, p)
     if period_of_date(v['purchase_date']) > p:
@@ -187,7 +200,6 @@ def dispose(conn, data):
     accum = v['opening_accum'] + recorded_accum(conn, vid, p)
     done_this_month = conn.execute('SELECT COUNT(*) FROM depr_records WHERE period = ?', (p,)).fetchone()[0] > 0
     if not done_this_month:
-        conn.execute('UPDATE vehicles SET status = ?, dispose_period = ? WHERE id = ?', ('已处置', p, vid))
         for pv, amt in plan_depreciation(conn, p):
             if pv['id'] == vid:
                 accum += amt
@@ -222,10 +234,9 @@ def dispose(conn, data):
     if gain > 0:
         lines.append({'summary': s + ' 处置收益', 'account': gain_acct, 'aux_id': aux_of(gain_acct), 'debit': 0, 'credit': gain})
 
-    conn.execute('UPDATE vehicles SET status = ?, dispose_period = ? WHERE id = ?', ('已处置', p, vid))
-    log(conn, '处置车辆', '%s %s' % (v['plate'], plabel(p)))
-    return {'date': date, 'lines': lines,
-            'note': '本凭证已按处置当月照提折旧计算累计折旧 %.2f 元。请核对后保存。' % (accum / 100)}
+    return {'date': date, 'lines': lines, 'dispose_vehicle_id': vid,
+            'note': '本凭证已按处置当月照提折旧计算累计折旧 %.2f 元。请核对后保存；'
+                    '保存这张凭证后，车辆才会标记为“已处置”。' % (accum / 100)}
 
 
 def undo_dispose(conn, vid):

@@ -176,6 +176,7 @@ def api_data_import_folder(conn, b):
 @get('/api/companies/export_all', needs_company=False)
 def api_companies_export_all(conn, q):
     fn, data = db.export_all_zip()
+    db.mark_exported()
     return FileResponse(data, fn, 'application/zip')
 
 
@@ -255,6 +256,7 @@ def api_update_check(conn, b):
 @get('/api/company/export')
 def api_company_export(conn, q, cid=None):
     fn, data = db.export_company_file(cid)
+    db.mark_exported()
     return FileResponse(data, fn, 'application/octet-stream')
 
 
@@ -318,7 +320,7 @@ def api_home(conn, q):
     status = C.closing_status(conn, cur)
     veh = conn.execute("SELECT COUNT(*), COALESCE(SUM(status = '在用'), 0) FROM vehicles").fetchone()
     return {'current_period': cur, 'voucher_count': cnt[0], 'unaudited': cnt[1], 'recent': recent,
-            'status': status, 'vehicle_count': veh[0], 'vehicle_in_use': veh[1]}
+            'export_reminder': db.export_reminder(conn), 'status': status, 'vehicle_count': veh[0], 'vehicle_in_use': veh[1]}
 
 
 @get('/api/logs')
@@ -560,26 +562,39 @@ def api_closing_carry(conn, b):
 
 
 @post('/api/closing/yearend')
-def api_closing_yearend(conn, b):
+def api_closing_yearend(conn, b, cid=None):
+    _backup_before(cid, '年末结转前')
     return C.year_end(conn, b.get('period'))
 
 
 @post('/api/closing/close')
-def api_closing_close(conn, b):
+def api_closing_close(conn, b, cid=None):
+    _backup_before(cid, '结账前')
     return C.close_period(conn, b.get('period'))
 
 
 @post('/api/closing/reopen')
-def api_closing_reopen(conn, b):
+def api_closing_reopen(conn, b, cid=None):
+    _backup_before(cid, '反结账前')
     return C.reopen_period(conn)
+
+
+def _backup_before(cid, label):
+    """结账、反结账、年末结转、导入这些大动作之前，先自动备份一次账套。"""
+    try:
+        db.backup_company(cid, label)
+    except (AppError, OSError) as e:
+        raise AppError('操作前自动备份账套失败，已停止，账套没有改动：%s' % e)
 
 
 # ================================================================ 导入导出与备份
 
 @post('/api/import')
-def api_import(conn, b):
+def api_import(conn, b, cid=None):
     raw = base64.b64decode(b.get('data') or '')
     kind = b.get('kind')
+    if kind in ('vouchers', 'vehicles', 'aux'):
+        _backup_before(cid, '导入前')
     if kind == 'vouchers':
         return IO.import_vouchers(conn, raw)
     if kind == 'vehicles':
@@ -624,6 +639,7 @@ def api_backup_restore(conn, b, cid=None):
 def api_backup_download(conn, q, cid=None):
     name = P(q, 'name')
     meta = db.get_meta(conn)
+    db.mark_exported()
     if name:
         path = db.backup_file_path(cid, name)
         with open(path, 'rb') as f:
@@ -633,7 +649,8 @@ def api_backup_download(conn, q, cid=None):
         return FileResponse(f.read(), '%s-%s' % (meta.get('company_name'), fn), 'application/octet-stream')
 
 
-NEEDS_CID = {api_company_export, api_backups, api_backup_now, api_backup_restore, api_backup_download, api_company_delete}
+NEEDS_CID = {api_company_export, api_backups, api_backup_now, api_backup_restore, api_backup_download, api_company_delete,
+             api_closing_yearend, api_closing_close, api_closing_reopen, api_import}
 NEEDS_TOKEN = {api_lock_status, api_lock_unlock, api_lock_lock, api_lock_set, api_lock_options, api_lock_disable,
                api_lock_recover}
 

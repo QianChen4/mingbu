@@ -471,8 +471,15 @@ def _load_settings():
         return {}
 
 
+def _secure_url(url):
+    """更新地址必须是加密的 https（本机地址除外，开发测试用）：不加密的 http 在网络上可以被人换掉内容。"""
+    return bool(re.match(r'^https://', url or '', re.I) or
+                re.match(r'^http://(127\.0\.0\.1|localhost)(:\d+)?(/|$)', url or '', re.I))
+
+
 def get_update_url():
-    return _load_settings().get('update_url') or UPDATE_URL
+    url = _load_settings().get('update_url')
+    return url if url and _secure_url(url) else UPDATE_URL
 
 
 def _save_setting(key, value):
@@ -486,8 +493,8 @@ def _save_setting(key, value):
 
 def set_update_url(url):
     url = (url or '').strip()
-    if url and not re.match(r'^https?://', url):
-        raise AppError('更新地址应以 http:// 或 https:// 开头')
+    if url and not _secure_url(url):
+        raise AppError('更新地址应以 https:// 开头（不加密的 http:// 地址不安全，不能使用）')
     _save_setting('update_url', url)
 
 
@@ -655,6 +662,8 @@ def _fetch_manifest(url, need_confirm=False, progress=None):
     """
     if not url:
         raise AppError('还没有设置更新地址')
+    if not _secure_url(url):
+        raise AppError('更新地址应以 https:// 开头（不加密的 http:// 地址不安全，不能使用）')
     p = progress or Progress()
     sources = _sources(url)
     direct = sources[0]

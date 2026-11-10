@@ -5,7 +5,7 @@ import json
 
 from .db import AppError, log, now_str, get_meta, company_profile, set_meta
 from .ledger import (account_map, check_open, closed_periods, period_of_date, plabel, start_period,
-                     level_of, parent_of)
+                     level_of, parent_of, _norm_date)
 from . import presets
 
 
@@ -128,7 +128,8 @@ def next_number(conn, period):
 def save_voucher(conn, data, kind=None):
     """新增或修改凭证。data: {id?, date, attachments, lines:[...]}。返回凭证 id。"""
     vid = data.get('id')
-    date = (data.get('date') or '').strip()
+    # 日期严格校验并统一成 2026-01-05 的写法（“2 月 30 日”“2026-2-5”这类写法会让账簿按日期查不到这张凭证）
+    date = _norm_date((data.get('date') or '').strip())
     period = period_of_date(date)
     check_open(conn, period)
     old = None
@@ -159,6 +160,10 @@ def save_voucher(conn, data, kind=None):
                            ' VALUES (?,?,?,?,?,?,?,?)', (period, number, date, attachments, kind, maker, ts, ts))
         vid = cur.lastrowid
         log(conn, '新增凭证', '%s 记-%04d' % (plabel(period), number))
+        if data.get('dispose_vehicle_id'):
+            # 车辆处置凭证：凭证保存成功后，才把车辆标记为“已处置”
+            from .vehicles import mark_disposed
+            mark_disposed(conn, int(data['dispose_vehicle_id']), period)
     for seq, ln in enumerate(lines, 1):
         conn.execute('INSERT INTO lines(voucher_id, period, seq, summary, account_code, aux_id, debit, credit, cf_item)'
                      ' VALUES (?,?,?,?,?,?,?,?,?)',

@@ -240,7 +240,16 @@ App.pages.voucher = async (page, params) => {
     if (readOnly) return;
     const bad = $$('[data-f=debit],[data-f=credit]', body).find(i => parseAmt(i.value) === null);
     if (bad) { bad.focus(); return toast('金额格式不正确', 'err'); }
+    // 手工录“结转到本年利润”的凭证会让利润表把这部分收入、费用冲掉（利润表只排除期末处理生成的结转凭证）
+    const profitCode = (meta.keymap || {}).profit;
+    const used = rows.filter(r => r.account && (r.debit || r.credit));
+    if (!v && profitCode && used.some(r => r.account === profitCode) && used.some(r => (App.acct[r.account] || {}).category === '损益')) {
+      if (!await confirmBox('这张凭证把损益类科目（收入、费用）转到了“本年利润”，像是手工做的结转损益。\n\n'
+        + '手工结转的金额会被利润表当成普通发生额，导致利润表上这部分收入、费用被冲掉。\n'
+        + '建议不要手工录，改用“期末处理 → 结转损益”自动生成。\n\n仍然要保存这张凭证吗？', '仍然保存')) return;
+    }
     const payload = {
+      dispose_vehicle_id: !v && draft && draft.dispose_vehicle_id ? draft.dispose_vehicle_id : undefined,
       id: v ? v.id : undefined, date: $('#v-date', page).value, attachments: +$('#v-att', page).value || 0,
       lines: rows.filter(r => r.account || r.debit || r.credit).map(r => ({
         summary: r.summary, account: r.account, aux_id: r.aux_id, cf_item: r.cf_item, debit: r.debit, credit: r.credit,

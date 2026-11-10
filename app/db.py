@@ -439,10 +439,75 @@ def backup_company(cid, label='手动'):
     return fn
 
 
-def _prune_backups(cid, keep=60):
-    files = sorted(f for f in os.listdir(_backup_folder(cid)) if f.endswith('.db'))
-    for f in files[:-keep]:
-        os.remove(os.path.join(_backup_folder(cid), f))
+# 各类备份分开计数，各留最近的若干个；没列出的类别（“手动”备份等）不会自动删除。
+# 以前所有备份合在一起只留 60 个，手动留的备份会被每天的自动备份挤掉。
+BACKUP_KEEP = {'每日自动': 60, '下载': 3}
+BACKUP_KEEP_OTHER_AUTO = 20     # 结账前、导入前、更新前、恢复前……每类各留 20 个
+BACKUP_NEVER_PRUNE = ('手动', '删除前备份')
+
+
+def _backup_label(fn):
+    # 文件名：20261110-093000-手动.db
+    return fn[:-3].split('-', 2)[2] if fn.count('-') >= 2 else ''
+
+
+def _prune_backups(cid):
+    folder = _backup_folder(cid)
+    groups = {}
+    for f in sorted(os.listdir(folder)):
+        if f.endswith('.db'):
+            groups.setdefault(_backup_label(f), []).append(f)
+    for label, files in groups.items():
+        if label in BACKUP_NEVER_PRUNE:
+            continue
+        keep = BACKUP_KEEP.get(label, BACKUP_KEEP_OTHER_AUTO)
+        for f in files[:-keep]:
+            try:
+                os.remove(os.path.join(folder, f))
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------- 提醒把备份导出到别处
+# 备份和账套在同一个文件夹里，硬盘坏了会一起丢。每次导出账套 / 下载备份时记下时间，
+# 太久没导出（或从没导出过）就在工作台提醒一次。
+
+def _settings_file():
+    return os.path.join(DATA_DIR, 'settings.json')
+
+
+def _read_settings():
+    try:
+        with open(_settings_file(), encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def mark_exported():
+    s = _read_settings()
+    s['last_export_at'] = now_str()
+    try:
+        with open(_settings_file(), 'w', encoding='utf-8') as f:
+            json.dump(s, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+EXPORT_REMIND_DAYS = 30
+
+
+def export_reminder(conn):
+    """返回 {'remind': 是否提醒, 'days': 距上次导出的天数（没导出过为 None）}。还没有凭证的账套不提醒。"""
+    if not conn.execute('SELECT COUNT(*) FROM vouchers').fetchone()[0]:
+        return {'remind': False, 'days': None}
+    last = _read_settings().get('last_export_at')
+    try:
+        days = (datetime.datetime.now() - datetime.datetime.strptime(last, '%Y-%m-%d %H:%M:%S')).days
+    except (TypeError, ValueError):
+        return {'remind': True, 'days': None}
+    return {'remind': days >= EXPORT_REMIND_DAYS, 'days': days}
 
 
 def list_backups(cid):

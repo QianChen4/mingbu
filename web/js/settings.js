@@ -289,7 +289,7 @@ function disposeForm(v) {
     <div class="field-row"><div class="field"><span>收款科目</span><select name="cash_account">${cashAccts.map(a => `<option value="${a.code}" ${a.code === '1002' ? 'selected' : ''}>${a.code} ${esc(a.full_name)}</option>`).join('')}</select></div>
     <div class="field"><span>收款银行账户</span><select name="cash_aux">${auxItems('银行账户').map(a => `<option value="${a.value}">${esc(a.code + ' ' + a.label)}</option>`).join('')}<option value="0">（不是银行存款时不用选）</option></select></div></div>
     <div class="field"><span>增值税处理</span><select name="vat_mode"><option>简易3%减按2%</option><option>13%</option><option>不计税</option></select></div>
-    <p class="hint">处置当月照提折旧。确定后车辆标记为“已处置”，并打开一张处置凭证草稿：收款、冲销原值和累计折旧、计算增值税，差额记入“资产处置损益”。请核对后保存凭证。增值税处理方式请以税务顾问意见为准。</p>`;
+    <p class="hint">处置当月照提折旧。确定后打开一张处置凭证草稿：收款、冲销原值和累计折旧、计算增值税，差额记入“资产处置损益”。请核对后保存凭证；凭证保存后，车辆才标记为“已处置”（草稿不保存就关掉，车辆仍是“在用”）。增值税处理方式请以税务顾问意见为准。</p>`;
   modal({
     title: '处置车辆（出售 / 报废）', body, width: 600,
     buttons: [{ text: '取消' }, {
@@ -548,7 +548,7 @@ App.pages.backup = async (page) => {
       <a class="btn" href="/api/backup/download?company=${App.cid}">下载当前账套数据文件</a>
       <a class="btn" href="/api/company/export?company=${App.cid}">导出账套（拿到别的电脑导入）</a></div>
     <div class="notice info">要在另一台电脑上继续记账：在这里导出账套，然后在另一台电脑的“切换账套”页面里导入。</div>
-    <div class="notice warn">数据只保存在这台电脑上。请定期把备份文件下载到 U 盘或网盘，防止电脑损坏导致数据丢失。系统保留最近 60 个备份。</div>
+    <div class="notice warn">数据只保存在这台电脑上。请定期把备份文件下载到 U 盘或网盘，防止电脑损坏导致数据丢失。每天的自动备份保留最近 60 个；结账、反结账、年末结转、导入之前也会自动备份（每类保留最近 20 个）；“立即备份”做的手动备份不会被自动删除。</div>
     <div class="tbl-wrap"><table class="tbl"><thead><tr><th>备份文件</th><th class="n">大小</th><th>操作</th></tr></thead><tbody>
     ${list.map(b => `<tr><td>${esc(b.name)}</td><td class="n">${(b.size / 1024).toFixed(0)} KB</td>
       <td><a class="btn link" href="/api/backup/download?company=${App.cid}&name=${encodeURIComponent(b.name)}">下载</a>
