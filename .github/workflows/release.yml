@@ -8,6 +8,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+env:
+  # 这次只发布哪个平台：mac / windows；留空表示两个都发布。v1.8.0 先只发布 Mac 版。
+  RELEASE_ONLY: mac
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -29,11 +32,12 @@ jobs:
         run: python -W ignore -m unittest discover -s tests -t .
       - name: 打包
         if: steps.v.outputs.exists == '0'
-        run: python tools/build.py
+        run: python tools/build.py ${RELEASE_ONLY:+--only $RELEASE_ONLY}
       - name: 发布
         if: steps.v.outputs.exists == '0'
         run: |
-          gh release create "v${{ steps.v.outputs.version }}" dist/caiwu-jizhang-windows.zip dist/caiwu-jizhang-mac.zip dist/latest.json \
-            --title "明簿 v${{ steps.v.outputs.version }}" --notes "$(python -c "import json;print(json.load(open('dist/latest.json',encoding='utf-8'))['notes'] or '见更新记录.md')")"
+          python -c "import json;open('dist/notes.md','w',encoding='utf-8').write(json.load(open('dist/latest.json',encoding='utf-8'))['notes'] or '见更新记录.md')"
+          gh release create "v${{ steps.v.outputs.version }}" dist/caiwu-jizhang-*.zip dist/latest.json \
+            --target "$GITHUB_SHA" --title "明簿 v${{ steps.v.outputs.version }}" --notes-file dist/notes.md
         env:
           GH_TOKEN: ${{ github.token }}

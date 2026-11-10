@@ -712,8 +712,13 @@ def _short(name):
 
 def _summary(info, srcs=None):
     latest = info['version']
+    # 有的版本只发布一个平台（例如先发 Mac 版）：这台电脑的平台没有安装包时，不算有新版本
+    try:
+        has_pkg = bool(_platform_entry(info).get('url'))
+    except AppError:
+        has_pkg = False
     r = {'current': VERSION, 'latest': latest, 'notes': info.get('notes', ''),
-         'has_update': _vtuple(latest) > _vtuple(VERSION), 'download': info.get('url', '')}
+         'has_update': has_pkg and _vtuple(latest) > _vtuple(VERSION), 'download': info.get('url', '')}
     if srcs:
         r['source'] = srcs[0][0]
     return r
