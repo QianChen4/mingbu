@@ -359,3 +359,12 @@ td.b { font-weight: 600; }
 .modal .q-form .q-row, .modal .q-form .range { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .modal .q-form .q-group { border-top: 1px dashed var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
 .q-summary { margin-left: 8px; }
+
+/* 日期框：文本框固定显示 2026/01/05，旁边是日历按钮；浏览器自带的日期框藏在按钮下面，只用来弹出日历 */
+.date-x { position: relative; display: inline-flex; align-items: center; }
+.date-x .date-txt { width: 128px; padding-right: 30px; font-variant-numeric: tabular-nums; }
+.date-x .date-txt.bad { border-color: var(--red); }
+.date-x .date-btn { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 24px; height: 24px; border: none; background: none; color: var(--ink-3); cursor: pointer; border-radius: 4px; font-size: 14px; line-height: 1; }
+.date-x .date-btn:hover:not(:disabled) { background: #eef2f7; color: var(--accent); }
+.date-x .date-native { position: absolute; right: 0; bottom: 0; width: 1px; height: 1px; padding: 0; border: none; opacity: 0; pointer-events: none; }
+.field > .date-x, .field > .date-x .date-txt { width: 100%; }

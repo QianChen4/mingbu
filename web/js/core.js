@@ -417,8 +417,8 @@ function isDate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')); }
 function rangeLabel(d1, d2) { return d1 === d2 ? d1 : `${d1} 至 ${d2}`; }
 function startDate() { const sp = App.meta.start_period; return `${Math.floor(sp / 100)}-${String(sp % 100).padStart(2, '0')}-01`; }
 function rangeControls(d1, d2) {
-  return `<span class="range"><label>日期 <input type="date" name="d1" value="${esc(d1)}"></label>
-    <label>至 <input type="date" name="d2" value="${esc(d2)}"></label></span>`;
+  return `<span class="range"><label data-label="日期">日期 <input type="date" name="d1" value="${esc(d1)}"></label>
+    <label data-label="至">至 <input type="date" name="d2" value="${esc(d2)}"></label></span>`;
 }
 function setRange(root, d1, d2) {
   const r = $('.range', root) || root;
@@ -432,6 +432,72 @@ function readRange(root) {
   if (a > b) throw new Error('起始日期不能晚于结束日期');
   return [a, b];
 }
+/* ================= 日期框：固定显示成 2026/01/05（年份在前） =================
+ * 浏览器自带的日期框按电脑的语言设置显示，有的电脑会显示成 01/05/2026。
+ * 这里把每个日期框换成“文本框 + 日历按钮”：文本框固定显示 年/月/日；原来的日期框藏起来，
+ * 仍然保存 2026-01-05 这样的值，所以各页面读写日期的写法都不用变。 */
+function dateSlash(iso) { return isDate(iso) ? iso.replace(/-/g, '/') : ''; }
+/** 把输入的文字变成 2026-01-05；可以写 2026/1/5、2026-1-5、2026.1.5、20260105。不是有效日期时返回 null，空白返回 '' */
+function parseDateText(s) {
+  s = String(s || '').trim();
+  if (!s) return '';
+  let m = s.match(/^(\d{4})\s*[\/\-.年]\s*(\d{1,2})\s*[\/\-.月]\s*(\d{1,2})\s*日?$/) || s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  const y = +m[1], mo = +m[2], d = +m[3];
+  const dt = new Date(y, mo - 1, d);
+  if (y < 1900 || dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+const nativeValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+function upgradeDateInput(inp) {
+  if (inp._datex) return;
+  inp._datex = true;
+  const wrap = document.createElement('span');
+  wrap.className = 'date-x';
+  const txt = document.createElement('input');
+  txt.type = 'text'; txt.className = 'date-txt'; txt.placeholder = '年/月/日'; txt.maxLength = 12;
+  txt.setAttribute('autocomplete', 'off');
+  txt.disabled = inp.disabled;
+  if (inp.id) { txt.id = inp.id + '-txt'; }
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'date-btn'; btn.tabIndex = -1; btn.title = '从日历里选'; btn.textContent = '▦';
+  btn.disabled = inp.disabled;
+  inp.parentNode.insertBefore(wrap, inp);
+  wrap.appendChild(txt); wrap.appendChild(btn); wrap.appendChild(inp);
+  inp.classList.add('date-native'); inp.tabIndex = -1;
+  txt.value = dateSlash(nativeValue.get.call(inp));
+  // 程序里给日期框赋值时，文本框跟着变
+  Object.defineProperty(inp, 'value', {
+    configurable: true,
+    get() { return nativeValue.get.call(inp); },
+    set(v) { nativeValue.set.call(inp, v); txt.value = dateSlash(nativeValue.get.call(inp)); txt.classList.remove('bad'); },
+  });
+  const commit = () => {
+    const iso = parseDateText(txt.value);
+    if (iso === null) { txt.classList.add('bad'); toast('日期格式不正确，请写成 2026/01/05 这样', 'err'); txt.value = dateSlash(inp.value); txt.classList.remove('bad'); return; }
+    if (iso === inp.value) { txt.value = dateSlash(iso); return; }
+    inp.value = iso;
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  txt.addEventListener('change', e => { e.stopPropagation(); commit(); });
+  txt.addEventListener('keydown', e => { if (e.key === 'Enter') commit(); });
+  txt.addEventListener('focus', () => setTimeout(() => txt.select(), 0));
+  // 从日历里选了日期
+  inp.addEventListener('change', () => { txt.value = dateSlash(nativeValue.get.call(inp)); });
+  btn.addEventListener('click', () => {
+    try { inp.showPicker(); } catch (e) { inp.focus(); }
+  });
+  // 日期框被程序禁用 / 启用时，文本框和按钮跟着变
+  new MutationObserver(() => { txt.disabled = btn.disabled = inp.disabled; }).observe(inp, { attributes: true, attributeFilter: ['disabled'] });
+}
+new MutationObserver(muts => {
+  for (const m of muts) for (const n of m.addedNodes) {
+    if (n.nodeType !== 1) continue;
+    if (n.matches && n.matches('input[type=date]')) upgradeDateInput(n);
+    else if (n.querySelectorAll) n.querySelectorAll('input[type=date]').forEach(upgradeDateInput);
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
 // 起止日期保持正序：改了起始日期导致晚于结束日期时，把结束日期调成一样；反之亦然
 document.addEventListener('change', e => {
   const r = e.target.closest && e.target.closest('.range');
