@@ -431,13 +431,14 @@ App.pages.vouchers = async (page, params) => {
   const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
   page.innerHTML = `
     <div class="page-head"><div><h1>凭证查询</h1><div class="sub">查询、审核、打印和导出凭证</div></div></div>
-    <div class="toolbar" id="flt">
-      ${rangeControls(pf, pt)}
-      <input type="text" name="q" placeholder="摘要关键字" value="${esc(params.q || '')}" style="width:140px">
-      <input type="text" name="account" placeholder="科目（编码或名称）" style="width:180px">
-      <select name="status"><option value="">全部状态</option><option value="unaudited" ${params.status === 'unaudited' ? 'selected' : ''}>未审核</option><option value="audited" ${params.status === 'audited' ? 'selected' : ''}>已审核</option></select>
-      <button class="btn primary" id="search">查询</button>
-    </div>
+    ${queryBar(`${rangeControls(pf, pt)}
+      <div class="q-row"><label data-label="凭证号">凭证号 <input type="number" name="no_from" min="1" style="width:110px" value="${esc(params.no_from || '')}"></label>
+        <label data-label="凭证号至">至 <input type="number" name="no_to" min="1" style="width:110px" value="${esc(params.no_to || '')}"></label></div>
+      <label data-label="摘要">摘要 <input type="text" name="q" placeholder="摘要里包含的字" value="${esc(params.q || '')}" style="width:300px"></label>
+      <label data-label="科目">科目 <input type="text" name="account" placeholder="编码或名称，含下级科目" style="width:300px"></label>
+      <div class="q-row"><label data-label="金额">金额 <input type="text" class="num" name="amt_from" style="width:130px" value="${esc(params.amt_from || '')}"></label>
+        <label data-label="金额至">至 <input type="text" class="num" name="amt_to" style="width:130px" value="${esc(params.amt_to || '')}"></label></div>
+      <label data-label="状态">状态 <select name="status"><option value="" data-any="1">全部状态</option><option value="unaudited" ${params.status === 'unaudited' ? 'selected' : ''}>未审核</option><option value="audited" ${params.status === 'audited' ? 'selected' : ''}>已审核</option></select></label>`)}
     <div class="toolbar">
       <label class="check"><input type="checkbox" id="all"> 全选</label><span class="sep"></span>
       <button class="btn" id="b-audit">审核</button><button class="btn" id="b-unaudit">取消审核</button>
@@ -454,8 +455,20 @@ App.pages.vouchers = async (page, params) => {
   let data = [];
   const load = async () => {
     const [a, b] = readRange(page);
-    remember(page, { from: a, to: b, status: $('[name=status]', page).value });
-    data = await api('/api/vouchers?' + qs({ from: a, to: b, q: $('[name=q]', page).value.trim(), account: acc.dataset.value || '', status: $('[name=status]', page).value }));
+    const f = formData($('#flt', page));
+    const amt = name => {
+      const x = parseAmt(f[name]);
+      if (x === null) throw new Error('金额格式不正确');
+      return f[name].trim() ? x : '';
+    };
+    const cond = { from: a, to: b, q: f.q.trim(), account: acc.dataset.value || '', status: f.status, no_from: f.no_from, no_to: f.no_to };
+    const keep = {};
+    Object.keys(cond).forEach(k => { if (cond[k] !== '' || k === 'status') keep[k] = cond[k]; });
+    if (f.amt_from.trim()) keep.amt_from = f.amt_from.trim();
+    if (f.amt_to.trim()) keep.amt_to = f.amt_to.trim();
+    const amtFrom = amt('amt_from'), amtTo = amt('amt_to');
+    remember(page, keep);
+    data = await api('/api/vouchers?' + qs(Object.assign({}, cond, { amt_from: amtFrom, amt_to: amtTo })));
     $('#list', page).innerHTML = data.map(v => `<tr data-id="${v.id}" class="clickable">
       <td><input type="checkbox" class="sel" value="${v.id}"></td><td>${plabel(v.period)}</td><td>${v.date}</td>
       <td>记-${String(v.number).padStart(4, '0')}</td><td>${esc(v.first_summary)}${v.line_count > 1 ? '' : ''}</td>${moneyCell(v.total)}
@@ -473,8 +486,7 @@ App.pages.vouchers = async (page, params) => {
   const selected = () => $$('.sel:checked', page).map(c => +c.value);
   const need = () => { const s = selected(); if (!s.length) toast('请先勾选凭证', 'err'); return s; };
   $('#all', page).onchange = e => $$('.sel', page).forEach(c => c.checked = e.target.checked);
-  $('#search', page).onclick = () => load().catch(e => toast(e.message, 'err'));
-  $('#flt', page).addEventListener('keydown', e => { if (e.key === 'Enter') load().catch(er => toast(er.message, 'err')); });
+  const run = bindQuery(page, '凭证查询', load);
   const doAudit = async flag => {
     const ids = need(); if (!ids.length) return;
     try { const r = await api('/api/voucher/audit', { ids, flag }); toast(`已${flag ? '审核' : '取消审核'} ${r.count} 张`, 'ok'); load(); }
@@ -517,5 +529,5 @@ App.pages.vouchers = async (page, params) => {
     if (!await confirmBox(`把 ${plabel(per)} 的凭证按日期重新从 1 号开始连续编号？`, '整理')) return;
     try { const r = await api('/api/voucher/renumber', { period: per }); toast(`已整理 ${r.count} 张`, 'ok'); load(); } catch (e) { toast(e.message, 'err'); }
   };
-  if (isQueried(params)) await load(); else notQueried(page);
+  if (isQueried(params)) await run(); else askQuery(page);
 };

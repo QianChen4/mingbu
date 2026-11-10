@@ -333,7 +333,9 @@ def api_logs(conn, q):
 @get('/api/vouchers')
 def api_vouchers(conn, q):
     return V.list_vouchers(conn, P(q, 'from'), P(q, 'to'), P(q, 'q', ''),
-                           P(q, 'account', ''), P(q, 'status', ''))
+                           P(q, 'account', ''), P(q, 'status', ''),
+                           P(q, 'no_from', None, int), P(q, 'no_to', None, int),
+                           P(q, 'amt_from', None, int), P(q, 'amt_to', None, int))
 
 
 @get('/api/voucher')
@@ -484,25 +486,35 @@ def api_opening_vehicles(conn, q):
 
 # ================================================================ 账簿与报表
 
+def _audited_only(q):
+    """查询条件“包含未审核凭证”没勾（unaudited=0）时，只统计已审核的凭证。不传时和以前一样统计全部。"""
+    return ledger.audited_only(P(q, 'unaudited', '1') == '0')
+
+
 @get('/api/balance')
 def api_balance(conn, q):
-    return ledger.balance_table(conn, P(q, 'from'), P(q, 'to'), P(q, 'level', 9, int),
-                                P(q, 'aux', '0') == '1', P(q, 'zero', '0') == '1')
+    with _audited_only(q):
+        return ledger.balance_table(conn, P(q, 'from'), P(q, 'to'), P(q, 'level', 9, int),
+                                    P(q, 'aux', '0') == '1', P(q, 'zero', '0') == '1',
+                                    P(q, 'code_from', ''), P(q, 'code_to', ''), P(q, 'level_from', 1, int))
 
 
 @get('/api/gl')
 def api_gl(conn, q):
-    return ledger.general_ledger(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'))
+    with _audited_only(q):
+        return ledger.general_ledger(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'))
 
 
 @get('/api/detail')
 def api_detail(conn, q):
-    return ledger.detail_ledger(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'), P(q, 'aux'))
+    with _audited_only(q):
+        return ledger.detail_ledger(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'), P(q, 'aux'))
 
 
 @get('/api/auxbal')
 def api_auxbal(conn, q):
-    return ledger.aux_balance(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'), P(q, 'zero', '0') == '1')
+    with _audited_only(q):
+        return ledger.aux_balance(conn, P(q, 'code'), P(q, 'from'), P(q, 'to'), P(q, 'zero', '0') == '1')
 
 
 def _report_range(q):

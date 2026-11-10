@@ -201,6 +201,27 @@ def month_spans(d1, d2):
 
 LINES_DATED = 'lines l JOIN vouchers v ON v.id = l.voucher_id'
 
+# 账簿查询条件“包含未审核凭证”：不勾时只统计已审核的凭证。
+# 每个请求在自己的线程里处理，所以用线程内的开关；不在 audited_only() 里时和以前一样统计全部凭证。
+import threading as _threading
+from contextlib import contextmanager as _contextmanager
+
+_flags = _threading.local()
+
+
+@_contextmanager
+def audited_only(on=True):
+    old = getattr(_flags, 'audited', False)
+    _flags.audited = bool(on)
+    try:
+        yield
+    finally:
+        _flags.audited = old
+
+
+def _aud():
+    return ' AND v.audited = 1' if getattr(_flags, 'audited', False) else ''
+
 
 def _z():
     return {'begin': 0, 'pd': 0, 'pc': 0, 'yd': 0, 'yc': 0, 'end': 0}
@@ -237,7 +258,7 @@ def balances_before(conn, d, accts=None):
         res[k] = res.get(k, 0) + o['at_start']
     if d > sd:
         for r in conn.execute('SELECT l.account_code, l.aux_id, SUM(l.debit - l.credit) FROM ' + LINES_DATED +
-                              ' WHERE v.date < ? GROUP BY l.account_code, l.aux_id', (d,)):
+                              ' WHERE v.date < ?' + _aud() + ' GROUP BY l.account_code, l.aux_id', (d,)):
             k = (r[0], r[1])
             res[k] = res.get(k, 0) + r[2]
     return res
@@ -280,7 +301,7 @@ def leaf_balances(conn, d1, d2, accts=None):
           SUM(CASE WHEN v.date >= :d1 THEN l.credit ELSE 0 END) AS pc,
           SUM(CASE WHEN v.date >= :y1 THEN l.debit ELSE 0 END) AS yd,
           SUM(CASE WHEN v.date >= :y1 THEN l.credit ELSE 0 END) AS yc
-        FROM ''' + LINES_DATED + ''' WHERE v.date <= :d2
+        FROM ''' + LINES_DATED + ''' WHERE v.date <= :d2''' + _aud() + '''
         GROUP BY l.account_code, l.aux_id'''
     for r in conn.execute(sql, {'d1': d1, 'd2': d2, 'y1': y1}):
         d = get((r['account_code'], r['aux_id']))
@@ -342,8 +363,21 @@ def direction_text(v):
 # ---------------------------------------------------------------- 科目余额表
 
 
-def balance_table(conn, d1, d2, level=9, with_aux=False, show_zero=False):
+def balance_table(conn, d1, d2, level=9, with_aux=False, show_zero=False, code_from='', code_to='', level_from=1):
+    """code_from、code_to：科目范围（含起止科目和止科目的全部下级）；level_from ~ level：显示的级次范围。
+    指定了科目范围时，合计只算范围内的科目，不再判断试算平衡。"""
     d1, d2, _raw = date_range(conn, d1, d2)
+    code_from, code_to = (code_from or '').strip(), (code_to or '').strip()
+    if code_from and code_to and code_from > code_to and not code_from.startswith(code_to):
+        code_from, code_to = code_to, code_from
+    filtered = bool(code_from or code_to)
+
+    def in_range(code):
+        if code_from and code < code_from:
+            return False
+        if code_to and code > code_to and not code.startswith(code_to):
+            return False
+        return True
     accts = account_map(conn)
     leaf = leaf_balances(conn, d1, d2, accts)
     agg = rollup(accts, leaf)
@@ -380,11 +414,18 @@ def balance_table(conn, d1, d2, level=9, with_aux=False, show_zero=False):
     totals = {k: 0 for k in ('begin_d', 'begin_c', 'pd', 'pc', 'yd', 'yc', 'end_d', 'end_c')}
     for a in sorted(accts.values(), key=lambda x: x['code']):
         d = agg.get(a['code'], _z())
-        if a['level'] == 1:
+        if not filtered:
+            top = a['level'] == 1
+        else:
+            # 合计只加范围内最上面一级的科目（它的上级不在范围内），免得上下级重复相加
+            if not in_range(a['code']):
+                continue
+            top = not (a['parent'] in accts and in_range(a['parent']))
+        if top:
             r1 = mk(a['code'], a['name'], d, 1)
             for k in totals:
                 totals[k] += r1[k]
-        if a['level'] > level:
+        if a['level'] > level or a['level'] < level_from:
             continue
         if not show_zero and not nonzero(d):
             continue
@@ -405,7 +446,7 @@ def balance_table(conn, d1, d2, level=9, with_aux=False, show_zero=False):
     balanced = (totals['begin_d'] == totals['begin_c'] and totals['pd'] == totals['pc']
                 and totals['end_d'] == totals['end_c'])
     return {'from': d1, 'to': d2, 'label': date_label(d1, d2), 'year': int(d2[:4]),
-            'rows': rows, 'totals': totals, 'balanced': balanced}
+            'rows': rows, 'totals': totals, 'balanced': balanced, 'filtered': filtered}
 
 
 def _dir(v):
@@ -433,7 +474,7 @@ def _opening_for(conn, accts, code, aux=None):
 def _sum_range(conn, like, a, b, aux=None):
     """科目（含下级）在 [a, b] 日期内的借、贷合计。"""
     q = ('SELECT COALESCE(SUM(l.debit), 0), COALESCE(SUM(l.credit), 0) FROM ' + LINES_DATED +
-         ' WHERE l.account_code LIKE ? AND v.date BETWEEN ? AND ?')
+         ' WHERE l.account_code LIKE ? AND v.date BETWEEN ? AND ?' + _aud())
     args = [like, a, b]
     if aux is not None:
         q += ' AND l.aux_id = ?'
@@ -512,7 +553,7 @@ def detail_ledger(conn, code, d1, d2, aux_id=None):
     begin = _begin_for(conn, accts, code, d1, aux)
     ytd_d, ytd_c = _ytd_before(conn, accts, code, d1, aux)
     items = conn.execute('SELECT l.*, v.number, v.date, v.id AS vid FROM ' + LINES_DATED +
-                         ' WHERE l.account_code LIKE ? AND v.date BETWEEN ? AND ?' + aux_cond +
+                         ' WHERE l.account_code LIKE ? AND v.date BETWEEN ? AND ?' + _aud() + aux_cond +
                          ' ORDER BY v.date, l.period, v.number, l.seq', [like, d1, d2] + params_aux).fetchall()
     aux_names = aux_name_map(conn)
     sd = start_date(conn)

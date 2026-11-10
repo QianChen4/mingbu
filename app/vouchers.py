@@ -189,7 +189,9 @@ def get_voucher(conn, vid):
     return v
 
 
-def list_vouchers(conn, pf, pt, keyword='', account='', status=''):
+def list_vouchers(conn, pf, pt, keyword='', account='', status='', no_from=None, no_to=None, amt_from=None,
+                  amt_to=None):
+    """no_from ~ no_to：凭证号范围；amt_from ~ amt_to：凭证金额（借方合计，分）范围。"""
     q = ('SELECT v.*, (SELECT SUM(debit) FROM lines WHERE voucher_id = v.id) AS total, '
          '(SELECT summary FROM lines WHERE voucher_id = v.id ORDER BY seq LIMIT 1) AS first_summary, '
          '(SELECT COUNT(*) FROM lines WHERE voucher_id = v.id) AS line_count '
@@ -212,6 +214,19 @@ def list_vouchers(conn, pf, pt, keyword='', account='', status=''):
         q += ' AND v.audited = 0'
     elif status == 'audited':
         q += ' AND v.audited = 1'
+    if no_from is not None:
+        q += ' AND v.number >= ?'
+        params.append(no_from)
+    if no_to is not None:
+        q += ' AND v.number <= ?'
+        params.append(no_to)
+    amt = '(SELECT COALESCE(SUM(debit), 0) FROM lines WHERE voucher_id = v.id)'
+    if amt_from is not None:
+        q += ' AND %s >= ?' % amt
+        params.append(amt_from)
+    if amt_to is not None:
+        q += ' AND %s <= ?' % amt
+        params.append(amt_to)
     q += ' ORDER BY v.period, v.number'  # 同一期间按凭证号排
     return [dict(r) for r in conn.execute(q, params)]
 

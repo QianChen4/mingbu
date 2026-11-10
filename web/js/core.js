@@ -208,7 +208,7 @@ function modal({ title, body, buttons = [], width }) {
   const bodyEl = $('.modal-body', mask);
   if (typeof body === 'string') bodyEl.innerHTML = body; else if (body) bodyEl.appendChild(body);
   const close = () => { mask.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = e => { if (e.key === 'Escape') close(); };
+  const onKey = e => { if (e.key === 'Escape' && !pickerList && Date.now() - pickerClosedAt > 80) close(); };
   document.addEventListener('keydown', onKey);
   $('.x', mask).onclick = close;
   const foot = $('.modal-foot', mask);
@@ -259,8 +259,9 @@ function formData(root) {
 /* ================= 下拉选择（可输入编码或名称搜索） ================= */
 let pickerList = null;
 let pointerInPicker = false;
+let pickerClosedAt = 0;   // 下拉框刚关掉的时间：按 Esc 关下拉框时，不要把所在的小窗口也一起关掉
 function closePicker() {
-  if (pickerList) { pickerList.remove(); pickerList = null; }
+  if (pickerList) { pickerList.remove(); pickerList = null; pickerClosedAt = Date.now(); }
   pointerInPicker = false;
 }
 // 页面滚动时关闭下拉框（下拉框是固定定位，不跟随页面滚动）；但下拉框自己滚动时不要关闭
@@ -444,10 +445,97 @@ document.addEventListener('change', e => {
 /** 点左侧菜单新开的标签没有查询条件：只显示默认条件，不自动查询，点“查询”才出结果 */
 function isQueried(params) { return Object.keys(params || {}).length > 0; }
 function notQueried(page) {
-  const msg = '设置好条件后点“查询”。';
+  const msg = '点“查询”设置条件。';
   const out = $('#out', page), list = $('#list', page);
   if (out) out.innerHTML = `<div class="empty">${msg}</div>`;
   else if (list) list.innerHTML = `<tr><td colspan="20" class="empty">${msg}</td></tr>`;
+}
+/* ---------- 查询条件小窗口（和用友一样：点“查询”弹出条件窗口，确定后出结果） ----------
+ * 页面上只留“查询”按钮和一行“当前条件”；条件表单（#flt）平时藏在页面里，点“查询”时搬进小窗口，
+ * 确定后搬回页面再查询——所以各页面读取条件的写法不用变。 */
+function queryBar(fields, extraButtons = '') {
+  return `<div class="toolbar"><button class="btn primary" id="search" title="设置查询条件">查询</button>${extraButtons}
+      <span class="q-summary muted small no-print"></span></div>
+    <div class="q-form" id="flt">${fields}</div>`;
+}
+/** 把条件表单里所有控件的值记下来 / 还原（取消时用） */
+function snapshotForm(root) {
+  return $$('input, select', root).map(el => ({ el, value: el.value, checked: el.checked, dv: el.dataset.value, dl: el.dataset.label, disabled: el.disabled }));
+}
+function restoreForm(snap) {
+  snap.forEach(s => {
+    s.el.value = s.value; s.el.checked = s.checked; s.el.disabled = s.disabled;
+    if (s.dv === undefined) delete s.el.dataset.value; else s.el.dataset.value = s.dv;
+    if (s.dl === undefined) delete s.el.dataset.label; else s.el.dataset.label = s.dl;
+  });
+}
+/** 一行文字说明当前的查询条件 */
+function querySummary(page) {
+  const flt = $('#flt', page), out = $('.q-summary', page);
+  if (!flt || !out) return;
+  const parts = [];
+  $$('label', flt).forEach(lb => {
+    const el = $('input, select', lb);
+    if (!el || el.disabled) return;
+    const name = lb.textContent.replace(/\s+/g, ' ').trim();
+    if (el.type === 'checkbox') { if (el.checked) parts.push(name); else if (lb.dataset.off) parts.push(lb.dataset.off); return; }
+    if (el.tagName === 'SELECT') {
+      const o = el.options[el.selectedIndex];
+      if (o && !o.dataset.any) parts.push(`${lb.dataset.label || ''} ${o.textContent}`.trim());
+      return;
+    }
+    if (el.value.trim()) parts.push(`${lb.dataset.label || name} ${el.value.trim()}`);
+  });
+  out.textContent = parts.length ? '当前条件：' + parts.join('　') : '';
+}
+/** 给页面接上查询小窗口。load：按 #flt 里的条件查询并显示。返回 run()（直接按当前条件查询）。 */
+function bindQuery(page, title, load) {
+  const flt = $('#flt', page);
+  const run = async () => { await load(); querySummary(page); };
+  const open = () => {
+    if ($('.modal-mask')) return;
+    closePicker();
+    const snap = snapshotForm(flt);
+    let ok = false;
+    const home = flt.parentNode, next = flt.nextSibling;
+    const back = () => { if (flt.parentNode !== home) home.insertBefore(flt, next); };
+    const m = modal({
+      title: title + ' — 查询条件', body: flt, width: 560,
+      buttons: [{ text: '取消' }, {
+        text: '确定', cls: 'primary', onClick: async () => {
+          closePicker();
+          back();
+          try { await run(); ok = true; }
+          catch (e) { toast(e.message, 'err'); m.el.appendChild(flt); return false; }
+        },
+      }],
+    });
+    const mask = m.el.closest('.modal-mask');
+    // 窗口一打开光标落在第一格；如果那是科目下拉框，先不要自动展开下拉列表（会挡住下面的条件）
+    setTimeout(closePicker, 60);
+    mask.addEventListener('keydown', e => {
+      // 在科目等下拉框里按回车是“选中”，不是“确定”
+      if (e.key !== 'Enter' || pickerList || Date.now() - pickerClosedAt < 80 || e.target.tagName === 'BUTTON') return;
+      e.preventDefault();
+      $('.modal-foot .btn.primary', mask).click();
+    });
+    // 窗口关掉（取消、✕、Esc）时把表单搬回页面；没点确定就还原成打开前的条件
+    const obs = new MutationObserver(() => {
+      if (document.body.contains(mask)) return;
+      obs.disconnect();
+      back();
+      if (!ok) restoreForm(snap);
+    });
+    obs.observe(document.body, { childList: true });
+  };
+  $('#search', page).onclick = open;
+  page._openQuery = open;
+  return run;
+}
+/** 左侧菜单新开的标签：还没查询，直接弹出查询条件窗口 */
+function askQuery(page) {
+  notQueried(page);
+  setTimeout(() => { if (document.body.contains(page) && page.classList.contains('on') && page._openQuery) page._openQuery(); }, 60);
 }
 function defaultRange() {
   const cur = App.meta.current_period;

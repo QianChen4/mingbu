@@ -351,3 +351,11 @@ td.b { font-weight: 600; }
 .side-scroll::-webkit-scrollbar { width: 8px; }
 .side-scroll::-webkit-scrollbar-track { background: transparent; }
 .side-scroll::-webkit-scrollbar-thumb { background: #3a4656; border-radius: 4px; }
+
+/* 查询条件小窗口：表单平时藏在页面里，点“查询”时搬进小窗口 */
+.q-form { display: none; }
+.modal .q-form { display: flex; flex-direction: column; gap: 12px; }
+.modal .q-form label { display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
+.modal .q-form .q-row, .modal .q-form .range { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.modal .q-form .q-group { border-top: 1px dashed var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.q-summary { margin-left: 8px; }

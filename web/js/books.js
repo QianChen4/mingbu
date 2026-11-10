@@ -33,34 +33,46 @@ function hideEmptyMonths(rows) {
 }
 const LEVEL_NAMES = ['一', '二', '三', '四', '五', '六'];
 /** 级次下拉：按账套里实际有几级科目列出“一级、二级、三级……”和“全部” */
-function levelOptions() {
+function levelOptions(withAll = true, sel = withAll ? 9 : 1) {
   const max = Math.max(1, ...App.meta.accounts.map(a => a.level || 1));
   let h = '';
-  for (let i = 1; i <= max; i++) h += `<option value="${i}">${i <= LEVEL_NAMES.length ? LEVEL_NAMES[i - 1] : i}级</option>`;
-  return h + '<option value="9" selected>全部</option>';
+  for (let i = 1; i <= max; i++) h += `<option value="${i}"${i === +sel ? ' selected' : ''}>${i <= LEVEL_NAMES.length ? LEVEL_NAMES[i - 1] : i}级</option>`;
+  return h + (withAll ? `<option value="9"${+sel === 9 ? ' selected' : ''}>末级（全部）</option>` : '');
 }
 
 /* ================= 科目余额表 ================= */
 App.pages.balance = async (page, params) => {
   const [dpf, dpt] = defaultRange();
   const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
-  page.innerHTML = pageHead('科目余额表', '各科目的期初余额、本期发生额、本年累计和期末余额') + `
-    <div class="toolbar" id="flt">${rangeControls(pf, pt)}
-      <label>级次 <select name="level">${levelOptions()}</select></label>
-      <label class="check"><input type="checkbox" name="aux"> 显示辅助核算明细</label>
-      <label class="check"><input type="checkbox" name="zero"> 显示无数据的科目</label>
-      <button class="btn primary" id="search">查询</button>${printExportButtons()}</div>
+  page.innerHTML = pageHead('科目余额表', '各科目的期初余额、本期发生额、本年累计和期末余额') + queryBar(`${rangeControls(pf, pt)}
+      <div class="q-row"><label data-label="科目">科目 <input type="text" name="code_from" style="width:200px" placeholder="从第一个科目"></label>
+        <label data-label="至">至 <input type="text" name="code_to" style="width:200px" placeholder="到最后一个科目"></label></div>
+      <div class="q-row"><label data-label="级次">级次 <select name="level_from">${levelOptions(false, params.lf || 1)}</select></label>
+        <label data-label="至">至 <select name="level">${levelOptions(true, params.lv || 9)}</select></label></div>
+      <div class="q-group"><label class="check" data-off="只统计已审核凭证"><input type="checkbox" name="unaudited"${+params.ua === 0 ? '' : ' checked'}> 包含未审核凭证</label>
+        <label class="check"><input type="checkbox" name="aux"${+params.aux === 1 ? ' checked' : ''}> 显示辅助核算明细</label>
+        <label class="check"><input type="checkbox" name="zero"${+params.zero === 1 ? ' checked' : ''}> 显示无数据的科目</label></div>`, printExportButtons()) + `
     <div id="out"></div>`;
+  const cf = $('[name=code_from]', page), ct = $('[name=code_to]', page);
+  attachPicker(cf, { source: () => acctItems(false) });
+  attachPicker(ct, { source: () => acctItems(false) });
+  if (params.cf) setPickerValue(cf, acctItem(params.cf));
+  if (params.ct) setPickerValue(ct, acctItem(params.ct));
   let data = null;
   const load = async () => {
     const [a, b] = readRange(page);
     const f = formData($('#flt', page));
-    remember(page, { from: a, to: b });
-    data = await api('/api/balance?' + qs({ from: a, to: b, level: f.level, aux: f.aux ? 1 : 0, zero: f.zero ? 1 : 0 }));
+    if (+f.level_from > +f.level) throw new Error('级次范围不正确：起始级次不能大于结束级次');
+    const ua = f.unaudited ? 1 : 0;
+    remember(page, { from: a, to: b, cf: cf.dataset.value || '', ct: ct.dataset.value || '', lf: f.level_from, lv: f.level, aux: f.aux ? 1 : 0, zero: f.zero ? 1 : 0, ua });
+    data = await api('/api/balance?' + qs({ from: a, to: b, level: f.level, level_from: f.level_from, aux: f.aux ? 1 : 0, zero: f.zero ? 1 : 0,
+      code_from: cf.dataset.value || '', code_to: ct.dataset.value || '', unaudited: ua }));
     const t = data.totals;
     $('#out', page).innerHTML = `
-      ${data.balanced ? '<div class="notice ok no-print">试算平衡：期初、本期发生额、期末余额的借贷合计都相等。</div>'
+      ${data.filtered ? '<div class="notice info no-print">只显示所选科目范围，合计是这些科目的合计。</div>'
+        : data.balanced ? '<div class="notice ok no-print">试算平衡：期初、本期发生额、期末余额的借贷合计都相等。</div>'
         : '<div class="notice err">试算不平衡！请检查期初余额。</div>'}
+      ${ua ? '' : '<div class="notice warn no-print">只统计了已审核的凭证，未审核凭证的金额没有算进来。</div>'}
       ${reportTitle('科目余额表', `${rangeLabel(data.from, data.to)}`)}
       <div class="tbl-wrap"><table class="tbl bal-tbl">
       <thead><tr><th>科目编码</th><th>科目名称</th><th class="c">方向</th><th class="n">期初余额</th><th class="n">本期借方发生</th><th class="n">本期贷方发生</th>
@@ -71,9 +83,9 @@ App.pages.balance = async (page, params) => {
       <tr class="sum"><td></td><td>合计</td><td class="c">${t.begin_dir}</td>${moneyCell(t.begin, false)}${moneyCell(t.pd, false)}${moneyCell(t.pc, false)}${moneyCell(t.yd, false)}${moneyCell(t.yc, false)}<td class="c">${t.end_dir}</td>${moneyCell(t.end, false)}</tr>
       </tbody></table></div><p class="hint no-print">点击任意一行可以查看该科目的明细账。</p>`;
     $$('tr[data-code]', page).forEach(tr => tr.onclick = () =>
-      go('detail', { code: tr.dataset.code, aux: tr.dataset.aux, from: data.from, to: data.to }));
+      go('detail', Object.assign({ code: tr.dataset.code, aux: tr.dataset.aux, from: data.from, to: data.to }, ua ? {} : { ua: 0 })));
   };
-  $('#search', page).onclick = () => load().catch(e => toast(e.message, 'err'));
+  const run = bindQuery(page, '科目余额表', load);
   bindPE(page, () => {
     if (!data) return;
     const rows = data.rows.map(r => [r.is_aux ? '' : r.code, r.path || r.name, r.begin_dir, r.begin, r.pd, r.pc, r.yd, r.yc, r.end_dir, r.end]);
@@ -83,7 +95,7 @@ App.pages.balance = async (page, params) => {
     exportXlsx('科目余额表', [{ name: '科目编码', width: 12 }, { name: '科目名称', width: 34 }, { name: '方向', width: 6 }, M('期初余额'), M('本期借方发生'), M('本期贷方发生'),
       M('累计借方发生'), M('累计贷方发生'), { name: '方向', width: 6 }, M('期末余额')], rows, data.label);
   });
-  if (isQueried(params)) await load(); else notQueried(page);
+  if (isQueried(params)) await run(); else askQuery(page);
 };
 
 /* ================= 总账 ================= */
@@ -91,25 +103,38 @@ App.pages.gl = async (page, params) => {
   const [dpf, dpt] = defaultRange();
   const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
   const code = params.code || '1002';
-  page.innerHTML = pageHead('总账', '按月列示科目的本月合计、本年累计和余额') + `
-    <div class="toolbar" id="flt"><label>科目 <input type="text" name="acct" style="width:240px"></label>${rangeControls(pf, pt)}
-      <label class="check"><input type="checkbox" name="all1"> 全部一级科目</label>
-      <label class="check"><input type="checkbox" name="hide"${+params.hide === 1 ? ' checked' : ''}> 无发生额的月份不显示</label>
-      <button class="btn primary" id="search">查询</button>${printExportButtons()}</div><div id="out"></div>`;
-  const acc = $('[name=acct]', page);
+  page.innerHTML = pageHead('总账', '按月列示科目的本月合计、本年累计和余额') + queryBar(`
+      <div class="q-row"><label data-label="科目">科目 <input type="text" name="acct" style="width:200px"></label>
+        <label data-label="至">至 <input type="text" name="acct_to" style="width:200px" placeholder="只查一个科目时不用填"></label></div>
+      ${rangeControls(pf, pt)}
+      <div class="q-group"><label class="check"><input type="checkbox" name="all1"${+params.all1 === 1 ? ' checked' : ''}> 全部一级科目</label>
+        <label class="check" data-off="只统计已审核凭证"><input type="checkbox" name="unaudited"${+params.ua === 0 ? '' : ' checked'}> 包含未审核凭证</label>
+        <label class="check"><input type="checkbox" name="hide"${+params.hide === 1 ? ' checked' : ''}> 无发生额的月份不显示</label></div>`, printExportButtons()) + `<div id="out"></div>`;
+  const acc = $('[name=acct]', page), accTo = $('[name=acct_to]', page);
   attachPicker(acc, { source: () => acctItems(false) });
+  attachPicker(accTo, { source: () => acctItems(false) });
   setPickerValue(acc, acctItem(code));
+  if (params.code_to) setPickerValue(accTo, acctItem(params.code_to));
   let results = [];
   const load = async () => {
     const [a, b] = readRange(page);
     const all1 = $('[name=all1]', page).checked, hide = $('[name=hide]', page).checked;
-    remember(page, Object.assign({ code: acc.dataset.value || '', from: a, to: b }, hide ? { hide: 1 } : {}));
-    const codes = all1 ? App.meta.accounts.filter(x => x.level === 1).map(x => x.code) : [acc.dataset.value];
-    if (!codes[0]) return toast('请选择科目', 'err');
+    const ua = $('[name=unaudited]', page).checked ? 1 : 0;
+    const c1 = acc.dataset.value || '', c2 = accTo.dataset.value || '';
+    if (!all1 && !c1) throw new Error('请选择科目');
+    remember(page, Object.assign({ code: c1, from: a, to: b }, c2 ? { code_to: c2 } : {}, all1 ? { all1: 1 } : {}, hide ? { hide: 1 } : {}, ua ? {} : { ua: 0 }));
+    let codes;
+    if (all1) codes = App.meta.accounts.filter(x => x.level === 1).map(x => x.code);
+    else if (c2 && c2 !== c1) {
+      // 科目范围：从起始科目到结束科目之间、和起始科目同一级的科目
+      const lo = c1 < c2 ? c1 : c2, hi = c1 < c2 ? c2 : c1, lv = (App.acct[c1] || {}).level || 1;
+      codes = App.meta.accounts.filter(x => x.level === lv && x.code >= lo && (x.code <= hi || x.code.startsWith(hi))).map(x => x.code);
+    } else codes = [c1];
+    const many = codes.length > 1;
     results = [];
     for (const c of codes) {
-      const d = await api('/api/gl?' + qs({ code: c, from: a, to: b }));
-      if (all1 && d.rows.every(r => !r.debit && !r.credit && !r.balance)) continue;
+      const d = await api('/api/gl?' + qs({ code: c, from: a, to: b, unaudited: ua }));
+      if (many && d.rows.every(r => !r.debit && !r.credit && !r.balance)) continue;
       if (hide) d.rows = hideEmptyMonths(d.rows);
       results.push(d);
     }
@@ -119,9 +144,9 @@ App.pages.gl = async (page, params) => {
       <tbody>${d.rows.map(r => `<tr class="${r.type === 'ytd' ? 'ytd' : r.type === 'month' ? 'clickable' : ''}" data-p="${r.type === 'month' ? r.from + '|' + r.to : ''}" data-code="${d.account.code}">
         <td>${r.type === 'begin' ? '' : plabel(r.period)}</td><td>${r.summary}</td>${moneyCell(r.debit)}${moneyCell(r.credit)}<td class="c">${r.dir}</td>${moneyCell(r.balance, false)}</tr>`).join('')}
       </tbody></table></div>`).join('') || '<div class="empty">没有数据</div>';
-    $$('tr[data-p]', page).forEach(tr => { if (tr.dataset.p) { const [f, t] = tr.dataset.p.split('|'); tr.onclick = () => go('detail', { code: tr.dataset.code, from: f, to: t }); } });
+    $$('tr[data-p]', page).forEach(tr => { if (tr.dataset.p) { const [f, t] = tr.dataset.p.split('|'); tr.onclick = () => go('detail', Object.assign({ code: tr.dataset.code, from: f, to: t }, ua ? {} : { ua: 0 })); } });
   };
-  $('#search', page).onclick = () => load().catch(e => toast(e.message, 'err'));
+  const run = bindQuery(page, '总账', load);
   bindPE(page, () => {
     if (!results.length) return;
     const rows = [];
@@ -132,7 +157,7 @@ App.pages.gl = async (page, params) => {
     exportXlsx('总账', [{ name: '期间', width: 14 }, { name: '摘要', width: 18 }, { name: '借方', type: 'money' }, { name: '贷方', type: 'money' },
       { name: '方向', width: 6 }, { name: '余额', type: 'money' }], rows, rangeLabel(results[0].from, results[0].to));
   });
-  if (isQueried(params)) await load(); else notQueried(page);
+  if (isQueried(params)) await run(); else askQuery(page);
 };
 
 /* ================= 明细账 ================= */
@@ -140,13 +165,13 @@ App.pages.detail = async (page, params) => {
   const [dpf, dpt] = defaultRange();
   const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
   const code = params.code || '1002';
-  page.innerHTML = pageHead('明细账', '科目的逐笔发生额与滚动余额，可以查某一天或任意一段时间；点击凭证号可打开原凭证') + `
-    <div class="toolbar" id="flt"><label>科目 <input type="text" name="acct" style="width:240px"></label>
-      <label>辅助项 <input type="text" name="aux" style="width:170px" placeholder="全部"></label>
+  page.innerHTML = pageHead('明细账', '科目的逐笔发生额与滚动余额，可以查某一天或任意一段时间；点击凭证号可打开原凭证') + queryBar(`
+      <label data-label="科目">科目 <input type="text" name="acct" style="width:300px"></label>
+      <label data-label="辅助项">辅助项 <input type="text" name="aux" style="width:300px" placeholder="全部"></label>
       ${rangeControls(pf, pt)}
-      <label class="check"><input type="checkbox" name="hide"${+params.hide === 1 ? ' checked' : ''}> 无发生额的月份不显示</label>
-      <button class="btn" id="prev-acct" title="上一个科目">‹</button><button class="btn" id="next-acct" title="下一个科目">›</button>
-      <button class="btn primary" id="search">查询</button>${printExportButtons()}</div><div id="out"></div>`;
+      <div class="q-group"><label class="check" data-off="只统计已审核凭证"><input type="checkbox" name="unaudited"${+params.ua === 0 ? '' : ' checked'}> 包含未审核凭证</label>
+        <label class="check"><input type="checkbox" name="hide"${+params.hide === 1 ? ' checked' : ''}> 无发生额的月份不显示</label></div>`,
+    `<button class="btn" id="prev-acct" title="上一个科目">‹ 上一个科目</button><button class="btn" id="next-acct" title="下一个科目">下一个科目 ›</button>` + printExportButtons()) + `<div id="out"></div>`;
   const acc = $('[name=acct]', page), aux = $('[name=aux]', page);
   const auxType = () => { const a = App.acct[acc.dataset.value]; return a ? a.aux_type : ''; };
   attachPicker(acc, { source: () => acctItems(false), onPick: () => { setPickerValue(aux, null); aux.disabled = !auxType(); } });
@@ -156,11 +181,12 @@ App.pages.detail = async (page, params) => {
   if (params.aux) setPickerValue(aux, auxItem(+params.aux));
   let data = null;
   const load = async () => {
-    if (!acc.dataset.value) return toast('请选择科目', 'err');
+    if (!acc.dataset.value) throw new Error('请选择科目');
     const [a, b] = readRange(page);
     const hide = $('[name=hide]', page).checked;
-    remember(page, Object.assign({ code: acc.dataset.value, aux: aux.dataset.value || '', from: a, to: b }, hide ? { hide: 1 } : {}));
-    data = await api('/api/detail?' + qs({ code: acc.dataset.value, from: a, to: b, aux: aux.dataset.value || '' }));
+    const ua = $('[name=unaudited]', page).checked ? 1 : 0;
+    remember(page, Object.assign({ code: acc.dataset.value, aux: aux.dataset.value || '', from: a, to: b }, hide ? { hide: 1 } : {}, ua ? {} : { ua: 0 }));
+    data = await api('/api/detail?' + qs({ code: acc.dataset.value, from: a, to: b, aux: aux.dataset.value || '', unaudited: ua }));
     if (hide) data.rows = hideEmptyMonths(data.rows);
     const ac = data.account;
     const showAcct = !ac.is_leaf, showAux = !!ac.aux_type && !aux.dataset.value;
@@ -179,11 +205,11 @@ App.pages.detail = async (page, params) => {
     i = Math.min(list.length - 1, Math.max(0, i + dir));
     setPickerValue(acc, acctItem(list[i].code));
     setPickerValue(aux, null); aux.disabled = !auxType();
-    load().catch(e => toast(e.message, 'err'));
+    run().catch(e => toast(e.message, 'err'));
   };
   $('#prev-acct', page).onclick = () => step(-1);
   $('#next-acct', page).onclick = () => step(1);
-  $('#search', page).onclick = () => load().catch(e => toast(e.message, 'err'));
+  const run = bindQuery(page, '明细账', load);
   bindPE(page, () => {
     if (!data) return;
     const rows = data.rows.map(r => {
@@ -194,7 +220,7 @@ App.pages.detail = async (page, params) => {
       { name: '辅助核算', width: 18 }, { name: '借方', type: 'money' }, { name: '贷方', type: 'money' }, { name: '方向', width: 6 }, { name: '余额', type: 'money' }],
       rows, `${data.account.code} ${data.account.full_name}　${data.label}`);
   });
-  if (isQueried(params)) await load(); else notQueried(page);
+  if (isQueried(params)) await run(); else askQuery(page);
 };
 
 /* ================= 辅助核算余额表 ================= */
@@ -202,19 +228,21 @@ App.pages.auxbal = async (page, params) => {
   const [dpf, dpt] = defaultRange();
   const pf = asDate(params.from) || dpf, pt = asDate(params.to, true) || dpt;
   const auxAccts = () => App.meta.accounts.filter(a => a.aux_type).map(a => ({ value: a.code, code: a.code, label: a.full_name, hint: a.aux_type }));
-  page.innerHTML = pageHead('辅助核算余额表', '按客户、供应商、车辆、银行账户等列示余额，例如每位客户的押金、每家供应商的欠款') + `
-    <div class="toolbar" id="flt"><label>科目 <input type="text" name="acct" style="width:240px"></label>${rangeControls(pf, pt)}
-      <label class="check"><input type="checkbox" name="zero"> 显示余额为零的项目</label>
-      <button class="btn primary" id="search">查询</button>${printExportButtons()}</div><div id="out"></div>`;
+  page.innerHTML = pageHead('辅助核算余额表', '按客户、供应商、车辆、银行账户等列示余额，例如每位客户的押金、每家供应商的欠款') + queryBar(`
+      <label data-label="科目">科目 <input type="text" name="acct" style="width:300px"></label>
+      ${rangeControls(pf, pt)}
+      <div class="q-group"><label class="check" data-off="只统计已审核凭证"><input type="checkbox" name="unaudited"${+params.ua === 0 ? '' : ' checked'}> 包含未审核凭证</label>
+        <label class="check"><input type="checkbox" name="zero"${+params.zero === 1 ? ' checked' : ''}> 显示余额为零的项目</label></div>`, printExportButtons()) + `<div id="out"></div>`;
   const acc = $('[name=acct]', page);
   attachPicker(acc, { source: auxAccts });
   setPickerValue(acc, acctItem(params.code || (App.meta.accounts.find(a => a.aux_type === '客户' && a.is_leaf) || App.meta.accounts.find(a => a.aux_type) || {}).code));
   let data = null;
   const load = async () => {
     const [a, b] = readRange(page);
-    if (!acc.dataset.value) return toast('请选择设置了辅助核算的科目', 'err');
-    remember(page, { code: acc.dataset.value, from: a, to: b });
-    data = await api('/api/auxbal?' + qs({ code: acc.dataset.value, from: a, to: b, zero: $('[name=zero]', page).checked ? 1 : 0 }));
+    if (!acc.dataset.value) throw new Error('请选择设置了辅助核算的科目');
+    const ua = $('[name=unaudited]', page).checked ? 1 : 0, zero = $('[name=zero]', page).checked ? 1 : 0;
+    remember(page, Object.assign({ code: acc.dataset.value, from: a, to: b }, zero ? { zero: 1 } : {}, ua ? {} : { ua: 0 }));
+    data = await api('/api/auxbal?' + qs({ code: acc.dataset.value, from: a, to: b, zero, unaudited: ua }));
     const t = data.totals;
     $('#out', page).innerHTML = `${reportTitle('辅助核算余额表', data.label, `科目：${data.account.code} ${esc(data.account.full_name)}`)}
       <div class="tbl-wrap"><table class="tbl"><thead><tr><th>编码</th><th>${esc(data.account.aux_type)}</th><th class="c">方向</th><th class="n">期初余额</th>
@@ -224,9 +252,9 @@ App.pages.auxbal = async (page, params) => {
       || '<tr><td colspan="10" class="empty">没有数据</td></tr>'}
       <tr class="sum"><td></td><td>合计（${data.rows.length} 项）</td><td class="c">${t.begin_dir}</td>${moneyCell(t.begin, false)}${['pd', 'pc', 'yd', 'yc'].map(k => moneyCell(t[k], false)).join('')}<td class="c">${t.end_dir}</td>${moneyCell(t.end, false)}</tr>
       </tbody></table></div><p class="hint no-print">“本年累计”是结束日期所在年度 1 月 1 日到结束日期。点击一行可以看这一项的明细账（每月有“本月合计”和“本年累计”）。</p>`;
-    $$('tr[data-aux]', page).forEach(tr => tr.onclick = () => go('detail', { code: data.account.code, aux: tr.dataset.aux, from: data.from, to: data.to }));
+    $$('tr[data-aux]', page).forEach(tr => tr.onclick = () => go('detail', Object.assign({ code: data.account.code, aux: tr.dataset.aux, from: data.from, to: data.to }, ua ? {} : { ua: 0 })));
   };
-  $('#search', page).onclick = () => load().catch(e => toast(e.message, 'err'));
+  const run = bindQuery(page, '辅助核算余额表', load);
   bindPE(page, () => {
     if (!data) return;
     const M = n => ({ name: n, type: 'money' });
@@ -237,5 +265,5 @@ App.pages.auxbal = async (page, params) => {
       M('本期借方发生'), M('本期贷方发生'), M('本年累计借方'), M('本年累计贷方'), { name: '方向', width: 6 }, M('期末余额')],
       rows, `${data.account.code} ${data.account.full_name}　${data.label}`);
   });
-  if (isQueried(params)) await load(); else notQueried(page);
+  if (isQueried(params)) await run(); else askQuery(page);
 };
