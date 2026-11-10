@@ -53,9 +53,6 @@ MAC_PY = {
     'arm64': ('https://github.com/indygreg/python-build-standalone/releases/download/20241002/'
               'cpython-3.12.7+20241002-aarch64-apple-darwin-install_only.tar.gz',
               '5a9cdbb8536839a83edae3e41eb44161b640d78181fec083e07c668ba796a875'),
-    'x86_64': ('https://github.com/indygreg/python-build-standalone/releases/download/20241002/'
-               'cpython-3.12.7+20241002-x86_64-apple-darwin-install_only.tar.gz',
-               '60eaf2c9a63926f5edfe7a0ecf4b2fbb37de6764f0c0100be245d098e3995da7'),
 }
 # Mac 版 Python 里用不到的部分，去掉减小体积
 MAC_PY_SKIP = re.compile(r'(^|/)(test|tests|idlelib|tkinter|turtledemo|ensurepip|lib2to3|__pycache__)(/|$)'
@@ -184,7 +181,7 @@ def fetch_python(arch):
 
 def build_mac(version):
     """Mac 测试版：和 Windows 版一样是一个文件夹，数据就放在这个文件夹里。
-    明簿/明簿.app（启动程序 + Python，两种芯片各一份）、明簿/versions/v版本号/（程序）、明簿/data（第一次打开时建）。"""
+    明簿/明簿.app（启动程序 + 苹果芯片的 Python）、明簿/versions/v版本号/（程序）、明簿/data（第一次打开时建）。"""
     vname = 'v' + version
     path = os.path.join(DIST, MAC_ZIP)
     z = Zip(path)
@@ -200,7 +197,7 @@ def build_mac(version):
     z.add_file(app + 'MacOS/mingbu', os.path.join(TOOLS, 'mac', 'launch.sh'), 0o755)
     z.add_file(app + 'Resources/boot.py', os.path.join(TOOLS, 'mac', 'boot.py'), 0o644)
     z.add_file(app + 'Resources/app.icns', os.path.join(ROOT, 'assets', 'app.icns'), 0o644)
-    for arch in ('arm64', 'x86_64'):
+    for arch in ('arm64',):  # 只带苹果芯片的 Python；Intel 芯片的 Mac 不再支持
         tgz = fetch_python(arch)
         with tarfile.open(tgz) as t:
             for m in t.getmembers():
