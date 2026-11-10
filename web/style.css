@@ -52,7 +52,8 @@ a:hover { text-decoration: underline; }
 #sidebar.hidden { display: none; }
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #topbar { height: 52px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 22px; background: var(--panel); border-bottom: 1px solid var(--line); }
-#page { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+/* position: relative：没选账套时页面直接放在 #page 里（.pane 是绝对定位），不加这个会盖到顶栏上 */
+#page { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; position: relative; }
 #tabbar { flex: none; display: flex; align-items: flex-end; gap: 3px; padding: 6px 12px 0; background: #e6eaf0; border-bottom: 1px solid var(--line-2); overflow-x: auto; scrollbar-width: thin; }
 #tabbar:empty { display: none; }
 .tab { display: flex; flex: none; box-sizing: border-box; width: 150px; align-items: center; gap: 4px; padding: 6px 6px 6px 12px; border: 1px solid transparent; border-bottom: none; border-radius: 7px 7px 0 0; color: var(--ink-2); font-size: 13px; cursor: pointer; white-space: nowrap; user-select: none; }
