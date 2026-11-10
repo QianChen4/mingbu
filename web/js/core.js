@@ -259,6 +259,7 @@ function formData(root) {
 /* ================= 下拉选择（可输入编码或名称搜索） ================= */
 let pickerList = null;
 let pointerInPicker = false;
+let pickerHoldUntil = 0;  // 查询小窗口刚自动弹出时，光标落在科目框上也先不展开下拉列表（否则会闪一下）
 let pickerClosedAt = 0;   // 下拉框刚关掉的时间：按 Esc 关下拉框时，不要把所在的小窗口也一起关掉
 function closePicker() {
   if (pickerList) { pickerList.remove(); pickerList = null; pickerClosedAt = Date.now(); }
@@ -342,7 +343,7 @@ function attachPicker(input, opts) {
     opts.onPick && opts.onPick(it);
   };
   input.setAttribute('autocomplete', 'off');
-  input.addEventListener('focus', () => { if (!isOpen()) { input.select(); show(); } });
+  input.addEventListener('focus', () => { if (Date.now() < pickerHoldUntil) return; if (!isOpen()) { input.select(); show(); } });
   // 已经有焦点时再点一下文本框，也要能重新打开下拉框
   input.addEventListener('mousedown', () => { if (document.activeElement === input && !isOpen()) setTimeout(show, 0); });
   input.addEventListener('input', () => { input.dataset.value = ''; show(); });
@@ -482,7 +483,7 @@ function upgradeDateInput(inp) {
   };
   txt.addEventListener('change', e => { e.stopPropagation(); commit(); });
   txt.addEventListener('keydown', e => { if (e.key === 'Enter') commit(); });
-  txt.addEventListener('focus', () => setTimeout(() => txt.select(), 0));
+  txt.addEventListener('focus', () => { if (Date.now() >= pickerHoldUntil) setTimeout(() => txt.select(), 0); });
   // 从日历里选了日期
   inp.addEventListener('change', () => { txt.value = dateSlash(nativeValue.get.call(inp)); });
   btn.addEventListener('click', () => {
@@ -561,6 +562,7 @@ function bindQuery(page, title, load) {
   const open = () => {
     if ($('.modal-mask')) return;
     closePicker();
+    pickerHoldUntil = Date.now() + 250;
     const snap = snapshotForm(flt);
     let ok = false;
     const home = flt.parentNode, next = flt.nextSibling;
@@ -577,8 +579,6 @@ function bindQuery(page, title, load) {
       }],
     });
     const mask = m.el.closest('.modal-mask');
-    // 窗口一打开光标落在第一格；如果那是科目下拉框，先不要自动展开下拉列表（会挡住下面的条件）
-    setTimeout(closePicker, 60);
     mask.addEventListener('keydown', e => {
       // 在科目等下拉框里按回车是“选中”，不是“确定”
       if (e.key !== 'Enter' || pickerList || Date.now() - pickerClosedAt < 80 || e.target.tagName === 'BUTTON') return;
@@ -601,7 +601,14 @@ function bindQuery(page, title, load) {
 /** 左侧菜单新开的标签：还没查询，直接弹出查询条件窗口 */
 function askQuery(page) {
   notQueried(page);
-  setTimeout(() => { if (document.body.contains(page) && page.classList.contains('on') && page._openQuery) page._openQuery(); }, 60);
+  // 页面一画好就马上弹出（和页面在同一帧里显示），不要等一下再弹，否则会看到页面先出来、再变暗，像闪了一下
+  const tryOpen = () => {
+    if (!document.body.contains(page) || !page._openQuery) return false;
+    if (!page.classList.contains('on')) return false;
+    page._openQuery();
+    return true;
+  };
+  Promise.resolve().then(() => { if (!tryOpen()) setTimeout(tryOpen, 0); });
 }
 function defaultRange() {
   const cur = App.meta.current_period;
