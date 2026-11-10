@@ -32,29 +32,86 @@ def _windows_browsers():
 
 
 def _mac_browsers():
+    """返回 [(浏览器 .app 的位置, 里面的可执行文件)]"""
     out = []
     for name in ('Google Chrome', 'Microsoft Edge'):
         for base in ('/Applications', os.path.expanduser('~/Applications')):
             app = os.path.join(base, name + '.app')
             exe = os.path.join(app, 'Contents', 'MacOS', name)
             if os.path.exists(exe):
-                out.append(exe)
+                out.append((app, exe))
                 break
     return out
+
+
+def _spawn(cmd):
+    kw = {'close_fds': True}
+    if os.name == 'nt':
+        kw['creationflags'] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        kw['start_new_session'] = True
+    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+
+
+def mac_ways(url):
+    """Mac 上打开窗口的几种办法，按顺序试：[(说明, 命令, 浏览器 .app)]。
+    1. 请系统（open 命令）启动浏览器的应用模式窗口——和在“应用程序”里双击浏览器是同一条路，最稳；
+    2. 直接运行浏览器里面的程序（以前一直用的办法，个别电脑上浏览器只在程序坞里跳一下、不出窗口）；
+    3. 用默认浏览器打开一个普通的标签页（一定能打开，只是多了地址栏）。"""
+    ways = []
+    for app, exe in _mac_browsers():
+        name = os.path.basename(app)[:-4]
+        ways.append(('请系统打开 %s 的应用模式窗口' % name,
+                     ['/usr/bin/open', '-n', '-a', app, '--args', '--app=' + url, WINDOW_SIZE], app))
+        ways.append(('直接运行 %s' % name, [exe, '--app=' + url, WINDOW_SIZE], app))
+    ways.append(('用默认浏览器打开', ['/usr/bin/open', url], ''))
+    return ways
+
+
+def open_ui_mac(url, connected, wait=7):
+    """Mac：一种办法打开后等几秒，页面一直没连上后台（connected() 为假）就换下一种。
+    页面连上后把浏览器叫到最前面（有时窗口开在了别的窗口后面）。在后台线程里运行。"""
+    import time
+    for label, cmd, app in mac_ways(url):
+        try:
+            _spawn(cmd)
+        except OSError as e:
+            print('打开窗口：%s 失败：%s' % (label, e))
+            continue
+        print('打开窗口：%s' % label)
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(0.4)
+            if connected():
+                print('打开窗口：页面已连上')
+                if app:
+                    try:
+                        _spawn(['/usr/bin/open', '-a', app])
+                    except OSError:
+                        pass
+                return True
+        print('打开窗口：等了 %d 秒页面还没连上，换一种办法' % wait)
+    print('打开窗口：几种办法都试过了，页面仍没有连上。可以手工在浏览器里打开 %s' % url)
+    return False
 
 
 def app_mode_browsers():
     if os.name == 'nt':
         return _windows_browsers()
     if sys.platform == 'darwin':
-        return _mac_browsers()
+        return [exe for _app, exe in _mac_browsers()]
     return []
 
 
-def open_ui(url):
-    """打开软件界面。返回 'app'（应用模式窗口）或 'browser'（默认浏览器）。"""
+def open_ui(url, connected=None):
+    """打开软件界面。返回 'app'（应用模式窗口）或 'browser'（默认浏览器）。
+    connected：一个函数，页面连上后台后返回真。Mac 上靠它判断窗口有没有真的打开，没打开就换一种办法。"""
     if os.environ.get('MINGBU_NO_BROWSER'):
         return 'none'
+    if sys.platform == 'darwin' and connected:
+        import threading
+        threading.Thread(target=open_ui_mac, args=(url, connected), daemon=False).start()
+        return 'app' if _mac_browsers() else 'browser'
     for exe in app_mode_browsers():
         try:
             kw = {'close_fds': True}

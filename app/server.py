@@ -85,7 +85,8 @@ def api_aux_type_delete(conn, b):
 
 @get('/api/version', needs_company=False)
 def api_version(conn, q):
-    return {'version': VERSION, 'root': db.ROOT, 'data_dir': db.DATA_DIR, 'started': STARTED}
+    return {'version': VERSION, 'root': db.ROOT, 'data_dir': db.DATA_DIR, 'started': STARTED,
+            'last_page_at': watchdog.last_new}
 
 
 # ================================================================ 启动密码
@@ -836,6 +837,16 @@ def _existing_instance():
     return None, None
 
 
+def _page_since(url, t0):
+    """已经在运行的那份后台：t0 之后有没有新页面连上。"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url + 'api/version', timeout=1.5) as r:
+            return float(json.loads(r.read().decode('utf-8')).get('last_page_at') or 0) >= t0
+    except Exception:
+        return False
+
+
 def _stop_other(url):
     """在后台运行的是别的版本（例如更新前的老版本没退出）：请它退出，最多等 8 秒。"""
     import urllib.request
@@ -893,6 +904,7 @@ class Watchdog:
         self.lock = threading.Lock()
         self.enabled = False
         self.ever = False
+        self.last_new = 0  # 最近一次有新页面连上的时间
         self.last_alive = time.time()
 
     def beat(self, pid, bye=False):
@@ -901,6 +913,8 @@ class Watchdog:
             if bye:
                 self.pages.pop(pid, None)
             else:
+                if pid not in self.pages:
+                    self.last_new = now
                 self.pages[pid] = now
                 self.ever = True
             self.last_alive = now
@@ -968,7 +982,8 @@ def run(port=8765, open_browser=True):
         # 同一个版本已经在运行：只打开窗口，不再启动第二份
         print('软件已经在运行：%s' % existing)
         if open_browser:
-            desktop.open_ui(existing)
+            t0 = time.time()
+            desktop.open_ui(existing, lambda: _page_since(existing, t0))
         return
     if existing:
         print('后台还在运行 v%s，先让它退出，再启动 v%s' % (ver, VERSION))
@@ -997,7 +1012,8 @@ def run(port=8765, open_browser=True):
     print('  关掉软件窗口，或点左下角“退出软件”即可关闭。')
     print('=' * 56)
     if open_browser:
-        threading.Timer(0.3, lambda: desktop.open_ui(url)).start()
+        t0 = time.time()
+        threading.Timer(0.3, lambda: desktop.open_ui(url, lambda: watchdog.last_new >= t0)).start()
         watchdog.start()  # 只启动后台服务（--no-browser，开发调试用）时不自动退出
     try:
         httpd.serve_forever()
